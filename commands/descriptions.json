@@ -1,0 +1,18 @@
+{
+  "commands": [
+    {
+      "name": "ShowMeshRunMacro",
+      "displayName": "ShowMesh: Run Macro",
+      "displayHint": "Asks the ShowMesh coordinator to run a macro and records the outcome locally.",
+      "script": "run-macro.sh",
+      "args": [
+        {
+          "name": "macroId",
+          "displayName": "Macro ID",
+          "type": "string",
+          "description": "The id of the ShowMesh macro to run, as shown in the ShowMesh operator UI or CLI."
+        }
+      ]
+    }
+  ]
+}
