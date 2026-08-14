@@ -1,7 +1,8 @@
 #!/bin/sh
-# Exercises the two things in this repo worth failing loudly over: the
-# architecture probe and the checksum verification. Every scenario here is
-# something that would otherwise be discovered on a real Pi, the hard way.
+# Exercises the things in this repo worth failing loudly over: the
+# architecture probe, checksum verification, and command-script validation.
+# Every scenario here is something that would otherwise be discovered on a
+# real Pi, the hard way.
 #
 # Requires python3 to synthesize small ELF and tarball fixtures; that is a
 # dev/CI-machine requirement only, and is never a runtime dependency of the
@@ -257,6 +258,85 @@ if sm_verify_checksum "$_sm_ckdir/$_sm_tarball" "$_sm_ckdir/does-not-exist.SHA25
     fail "a missing checksum manifest is rejected" "unexpected success"
 else
     pass "a missing checksum manifest is rejected"
+fi
+
+# ---------------------------------------------------------------------------
+# Command script validation
+# ---------------------------------------------------------------------------
+
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/commands.sh"
+
+echo "== command script validation =="
+
+make_plugin_tree() {
+    # $1 = plugin dir to create, populated with a commands/descriptions.json
+    # naming one script. The caller decides whether that script exists.
+    mkdir -p "$1/commands"
+}
+
+# All named scripts exist and are executable: passes clean.
+_sm_cmd_ok="$_sm_tmp/cmd-ok"
+make_plugin_tree "$_sm_cmd_ok"
+cat > "$_sm_cmd_ok/commands/descriptions.json" <<'JSON'
+[
+  {
+    "name": "ShowMeshRunMacro",
+    "script": "run-macro.sh",
+    "args": [
+      { "name": "macroId", "description": "the macro id, containing the word script inside this sentence to prove extraction is not fooled by it", "type": "string", "optional": false }
+    ]
+  }
+]
+JSON
+printf '#!/bin/sh\ntrue\n' > "$_sm_cmd_ok/commands/run-macro.sh"
+chmod 0755 "$_sm_cmd_ok/commands/run-macro.sh"
+
+if sm_validate_command_scripts "$_sm_cmd_ok"; then
+    pass "a descriptions.json whose script exists and is executable validates"
+else
+    fail "a descriptions.json whose script exists and is executable validates" "unexpected failure"
+fi
+
+names=$(sm_command_script_names "$_sm_cmd_ok/commands/descriptions.json")
+assert_eq "script name extraction ignores 'script' appearing inside a description string" "run-macro.sh" "$names"
+
+# The named script does not exist at all.
+_sm_cmd_missing="$_sm_tmp/cmd-missing"
+make_plugin_tree "$_sm_cmd_missing"
+cat > "$_sm_cmd_missing/commands/descriptions.json" <<'JSON'
+[
+  { "name": "ShowMeshRunMacro", "script": "run-macro.sh", "args": [] }
+]
+JSON
+out=$(sm_validate_command_scripts "$_sm_cmd_missing" 2>"$_sm_tmp/cmd-missing.err")
+status=$?
+assert_failure "a descriptions.json naming a script that does not exist is rejected" "$status"
+assert_contains "the missing-script message names the script" "$(cat "$_sm_tmp/cmd-missing.err")" "run-macro.sh"
+
+# The named script exists but was committed without the executable bit —
+# the case FPP's own IsOk() would let through and then fail on when fired.
+_sm_cmd_noexec="$_sm_tmp/cmd-noexec"
+make_plugin_tree "$_sm_cmd_noexec"
+cat > "$_sm_cmd_noexec/commands/descriptions.json" <<'JSON'
+[
+  { "name": "ShowMeshRunMacro", "script": "run-macro.sh", "args": [] }
+]
+JSON
+printf '#!/bin/sh\ntrue\n' > "$_sm_cmd_noexec/commands/run-macro.sh"
+chmod 0644 "$_sm_cmd_noexec/commands/run-macro.sh"
+out=$(sm_validate_command_scripts "$_sm_cmd_noexec" 2>"$_sm_tmp/cmd-noexec.err")
+status=$?
+assert_failure "a descriptions.json naming a script that exists but is not executable is rejected" "$status"
+assert_contains "the not-executable message distinguishes it from missing" "$(cat "$_sm_tmp/cmd-noexec.err")" "not executable"
+
+# No descriptions.json at all.
+_sm_cmd_nofile="$_sm_tmp/cmd-nofile"
+mkdir -p "$_sm_cmd_nofile"
+if sm_validate_command_scripts "$_sm_cmd_nofile" 2>/dev/null; then
+    fail "a missing descriptions.json is rejected" "unexpected success"
+else
+    pass "a missing descriptions.json is rejected"
 fi
 
 # ---------------------------------------------------------------------------

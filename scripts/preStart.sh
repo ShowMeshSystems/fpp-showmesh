@@ -9,6 +9,17 @@
 # host of a different architecture, or a binary otherwise missing or
 # corrupted since the last successful install — never a routine occurrence.
 #
+# Confirmed against FPP 9.5.3's own source (scripts/functions,
+# runPreStartScripts): this script is invoked as `/bin/bash <file>` with
+# NO arguments at all, unlike fpp_install.sh/fpp_upgrade.sh. It inherits
+# fppd_start's own shell environment instead of the stripped three-variable
+# execve environment a fired command gets — a different situation from
+# both of the other two conventions in this repository, so FPPDIR is read
+# below from the environment, not from a positional argument, though
+# whether it is reliably set to the right value in that inherited
+# environment has not been independently confirmed; /opt/fpp remains the
+# fallback either way.
+#
 # Must be committed with the executable bit set (mode 0755).
 
 _sm_script_dir=$(cd "$(dirname "$0")" && pwd)
@@ -29,7 +40,7 @@ fi
 
 sm_log "showmesh-fpp-plugin binary missing or not executable at $_sm_binary; attempting repair"
 
-_sm_fppdir=$(sm_fppdir "${1:-}")
+_sm_fppdir=$(sm_fppdir "${FPPDIR:-}")
 
 _sm_version_file="$_sm_plugin_dir/VERSION"
 if [ ! -f "$_sm_version_file" ]; then

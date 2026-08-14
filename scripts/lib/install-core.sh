@@ -6,7 +6,8 @@
 # upgrade (it does not call fpp_upgrade.sh at all) while FPP 10 calls
 # fpp_upgrade.sh first, so this body cannot assume it only ever runs once.
 #
-# Requires common.sh, arch.sh, fetch.sh, and verify.sh to already be sourced.
+# Requires common.sh, arch.sh, fetch.sh, verify.sh, and commands.sh to
+# already be sourced.
 
 # Creates the plugin's state directory and the files the binary expects to
 # find there, without overwriting anything that already exists. This runs on
@@ -155,6 +156,10 @@ sm_install_or_upgrade() {
     _sm_fppdir="$1"
     _sm_plugin_dir="$2"
     _sm_version="$3"
+
+    # Cheap and entirely local: catch a command that FPP would silently
+    # drop before doing any network I/O for the binary itself.
+    sm_validate_command_scripts "$_sm_plugin_dir" || return 1
 
     sm_ensure_config_scaffold || return 1
     sm_install_binary "$_sm_plugin_dir" "$_sm_fppdir" "$_sm_version" || return 1
