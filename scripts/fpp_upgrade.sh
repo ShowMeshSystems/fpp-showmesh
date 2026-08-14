@@ -9,6 +9,11 @@
 # to the resolved branch/sha before invoking either script and expects the
 # result of running this to be the same as a fresh install at that version.
 #
+# On FPP 9.x, the one caller that reaches this script's sibling on the
+# upgrade path (www/api/controllers/plugin.php) exports FPPDIR into the
+# environment rather than passing it as an argv word — see lib/common.sh's
+# sm_fppdir for why this matters and is handled, not assumed.
+#
 # Must be committed with the executable bit set (mode 0755).
 
 _sm_script_dir=$(cd "$(dirname "$0")" && pwd)

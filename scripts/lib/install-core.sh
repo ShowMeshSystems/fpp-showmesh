@@ -5,18 +5,31 @@
 # is written to be safe to re-run: FPP 9.x honours fpp_install.sh on every
 # upgrade (it does not call fpp_upgrade.sh at all) while FPP 10 calls
 # fpp_upgrade.sh first, so this body cannot assume it only ever runs once.
+# preStart.sh's repair path also calls sm_install_or_upgrade directly
+# (not just sm_install_binary), so that a repair re-scaffolds permissions
+# too, not only the binary.
 #
 # Requires common.sh, arch.sh, fetch.sh, verify.sh, and commands.sh to
 # already be sourced.
 
-# Creates the plugin's state directory and the files the binary expects to
-# find there, without overwriting anything that already exists. This runs on
-# every install and every upgrade, so an existing credential or config must
-# survive a re-run untouched.
+# Creates the plugin's credential directory/file and non-secret state
+# directory/files, without overwriting anything that already exists. This
+# runs on every install, upgrade, and preStart repair, so an existing
+# credential or config must survive a re-run untouched.
+#
+# Every chown and chmod here is checked, and every chmod is followed by
+# reading the mode back rather than trusting the exit code alone. FPP
+# supports running its media directory from a USB stick, and a vfat or
+# exFAT mount reports chmod as successful while actually deriving every
+# file's mode from mount options — silently ignoring the request. Catching
+# that here turns a silent install-time misconfiguration into a loud
+# install failure, instead of the credential file being readable by
+# everything on the host and the binary refusing to start at showtime
+# because it requires exactly 0600.
 sm_ensure_config_scaffold() {
-    local _sm_configdir _sm_mkdir _sm_chown _sm_chmod _sm_credfile
+    local _sm_mkdir _sm_chown _sm_chmod
+    local _sm_creddir _sm_credfile _sm_statedir
     local _sm_name_default _sm_fname _sm_default _sm_fpath
-    _sm_configdir=$(sm_config_dir)
 
     # /usr/sbin/chown is a macOS-only location, listed only so this repo's
     # own tests can run unmodified on a developer Mac; Debian FPP hosts
@@ -25,12 +38,23 @@ sm_ensure_config_scaffold() {
     _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || return 1
     _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
 
-    "$_sm_mkdir" -p "$_sm_configdir" || {
-        sm_log_err "could not create config directory: $_sm_configdir"
+    # Credential directory and file. Deliberately outside FPP's own
+    # media/config tree — see sm_credential_dir's comment in common.sh for
+    # why — so nothing FPP itself serves over HTTP can reach it.
+    _sm_creddir=$(sm_credential_dir)
+    "$_sm_mkdir" -p "$_sm_creddir" || {
+        sm_log_err "could not create credential directory: $_sm_creddir"
         return 1
     }
-    "$_sm_chown" fpp:fpp "$_sm_configdir"
-    "$_sm_chmod" 0755 "$_sm_configdir"
+    "$_sm_chown" fpp:fpp "$_sm_creddir" || {
+        sm_log_err "could not set ownership of $_sm_creddir to fpp:fpp"
+        return 1
+    }
+    "$_sm_chmod" 0700 "$_sm_creddir" || {
+        sm_log_err "could not set permissions on $_sm_creddir"
+        return 1
+    }
+    sm_verify_mode "$_sm_creddir" 700 || return 1
 
     _sm_credfile=$(sm_credential_file)
     if [ ! -e "$_sm_credfile" ]; then
@@ -40,9 +64,36 @@ sm_ensure_config_scaffold() {
         }
         sm_log "created empty credential file at $_sm_credfile; it must be provisioned with a scheduler credential before the plugin can act"
     fi
-    "$_sm_chown" fpp:fpp "$_sm_credfile"
-    "$_sm_chmod" 0600 "$_sm_credfile"
+    "$_sm_chown" fpp:fpp "$_sm_credfile" || {
+        sm_log_err "could not set ownership of $_sm_credfile to fpp:fpp"
+        return 1
+    }
+    "$_sm_chmod" 0600 "$_sm_credfile" || {
+        sm_log_err "could not set permissions on $_sm_credfile"
+        return 1
+    }
+    sm_verify_mode "$_sm_credfile" 600 || return 1
 
+    # Non-secret state directory and files, under FPP's media tree.
+    _sm_statedir=$(sm_state_dir)
+    "$_sm_mkdir" -p "$_sm_statedir" || {
+        sm_log_err "could not create state directory: $_sm_statedir"
+        return 1
+    }
+    "$_sm_chown" fpp:fpp "$_sm_statedir" || {
+        sm_log_err "could not set ownership of $_sm_statedir to fpp:fpp"
+        return 1
+    }
+    "$_sm_chmod" 0700 "$_sm_statedir" || {
+        sm_log_err "could not set permissions on $_sm_statedir"
+        return 1
+    }
+    sm_verify_mode "$_sm_statedir" 700 || return 1
+
+    # 0600, matching what the binary itself uses when it rewrites these
+    # files — the scaffold and the binary must agree on one mode rather
+    # than disagreeing from the moment install finishes to the moment the
+    # binary first writes.
     for _sm_name_default in \
         "config.json:{}" \
         "status.json:{}" \
@@ -51,15 +102,22 @@ sm_ensure_config_scaffold() {
     do
         _sm_fname="${_sm_name_default%%:*}"
         _sm_default="${_sm_name_default#*:}"
-        _sm_fpath="$_sm_configdir/$_sm_fname"
+        _sm_fpath="$_sm_statedir/$_sm_fname"
         if [ ! -e "$_sm_fpath" ]; then
             printf '%s\n' "$_sm_default" > "$_sm_fpath" || {
                 sm_log_err "could not create $_sm_fpath"
                 return 1
             }
         fi
-        "$_sm_chown" fpp:fpp "$_sm_fpath"
-        "$_sm_chmod" 0644 "$_sm_fpath"
+        "$_sm_chown" fpp:fpp "$_sm_fpath" || {
+            sm_log_err "could not set ownership of $_sm_fpath to fpp:fpp"
+            return 1
+        }
+        "$_sm_chmod" 0600 "$_sm_fpath" || {
+            sm_log_err "could not set permissions on $_sm_fpath"
+            return 1
+        }
+        sm_verify_mode "$_sm_fpath" 600 || return 1
     done
 
     return 0
@@ -70,7 +128,7 @@ sm_ensure_config_scaffold() {
 # is exactly the case where the previously installed binary must not be kept.
 sm_install_binary() {
     local _sm_plugin_dir _sm_fppdir _sm_version _sm_arch _sm_tarball_name _sm_sums_name
-    local _sm_base_url _sm_mktemp _sm_workdir _sm_tar _sm_mv _sm_chmod _sm_chown _sm_target
+    local _sm_base_url _sm_mktemp _sm_workdir _sm_rm _sm_tar _sm_mv _sm_chmod _sm_chown _sm_target
     _sm_plugin_dir="$1"
     _sm_fppdir="$2"
     _sm_version="$3"
@@ -84,69 +142,111 @@ sm_install_binary() {
     _sm_tarball_name=$(sm_artifact_tarball_name "$_sm_version" "$_sm_arch")
     _sm_sums_name=$(sm_artifact_sums_name "$_sm_version")
     _sm_base_url=$(sm_artifact_base_url "$_sm_version")
+    sm_check_base_url_scheme "$_sm_base_url" || return 1
 
     _sm_mktemp=$(sm_resolve_bin mktemp /bin/mktemp /usr/bin/mktemp) || return 1
+    _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
     _sm_workdir=$("$_sm_mktemp" -d /tmp/fpp-showmesh.XXXXXX) || {
         sm_log_err "could not create a temporary working directory"
         return 1
     }
-    # shellcheck disable=SC2064
-    trap "rm -rf '$_sm_workdir'" EXIT
+    # No trap here, deliberately: a trap set inside a function is process-
+    # global in POSIX sh, not function-scoped, so it would silently
+    # replace any EXIT trap a caller already had set. Cleaning up
+    # explicitly on every return path below is more verbose but does not
+    # have that hazard.
 
     sm_log "fetching $_sm_tarball_name from $_sm_base_url"
-    sm_download "$_sm_base_url/$_sm_tarball_name" "$_sm_workdir/$_sm_tarball_name" || return 1
-    sm_download "$_sm_base_url/$_sm_sums_name" "$_sm_workdir/$_sm_sums_name" || return 1
-
-    sm_verify_checksum "$_sm_workdir/$_sm_tarball_name" "$_sm_workdir/$_sm_sums_name" "$_sm_tarball_name" || {
-        sm_log_err "refusing to install an artifact that failed checksum verification"
+    if ! sm_download "$_sm_base_url/$_sm_tarball_name" "$_sm_workdir/$_sm_tarball_name"; then
+        "$_sm_rm" -rf "$_sm_workdir"
         return 1
-    }
-
-    _sm_tar=$(sm_resolve_bin tar /bin/tar /usr/bin/tar) || return 1
-    "$_sm_tar" -xzf "$_sm_workdir/$_sm_tarball_name" -C "$_sm_workdir" || {
-        sm_log_err "could not extract $_sm_tarball_name"
-        return 1
-    }
-
-    if [ ! -f "$_sm_workdir/showmesh-fpp-plugin" ]; then
-        sm_log_err "$_sm_tarball_name did not contain showmesh-fpp-plugin at its top level"
+    fi
+    if ! sm_download "$_sm_base_url/$_sm_sums_name" "$_sm_workdir/$_sm_sums_name"; then
+        "$_sm_rm" -rf "$_sm_workdir"
         return 1
     fi
 
-    _sm_mv=$(sm_resolve_bin mv /bin/mv /usr/bin/mv) || return 1
-    _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
-    _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || return 1
+    if ! sm_verify_checksum "$_sm_workdir/$_sm_tarball_name" "$_sm_workdir/$_sm_sums_name" "$_sm_tarball_name"; then
+        sm_log_err "refusing to install an artifact that failed checksum verification"
+        "$_sm_rm" -rf "$_sm_workdir"
+        return 1
+    fi
 
-    _sm_target=$(sm_binary_path "$_sm_plugin_dir")
-    "$_sm_mv" -f "$_sm_workdir/showmesh-fpp-plugin" "$_sm_target" || {
-        sm_log_err "could not install binary to $_sm_target"
+    _sm_tar=$(sm_resolve_bin tar /bin/tar /usr/bin/tar) || {
+        "$_sm_rm" -rf "$_sm_workdir"
         return 1
     }
-    "$_sm_chmod" 0755 "$_sm_target"
-    "$_sm_chown" fpp:fpp "$_sm_target"
+    if ! "$_sm_tar" -xzf "$_sm_workdir/$_sm_tarball_name" -C "$_sm_workdir"; then
+        sm_log_err "could not extract $_sm_tarball_name"
+        "$_sm_rm" -rf "$_sm_workdir"
+        return 1
+    fi
+
+    if [ ! -f "$_sm_workdir/showmesh-fpp-plugin" ]; then
+        sm_log_err "$_sm_tarball_name did not contain showmesh-fpp-plugin at its top level"
+        "$_sm_rm" -rf "$_sm_workdir"
+        return 1
+    fi
+
+    _sm_mv=$(sm_resolve_bin mv /bin/mv /usr/bin/mv) || {
+        "$_sm_rm" -rf "$_sm_workdir"
+        return 1
+    }
+    _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || {
+        "$_sm_rm" -rf "$_sm_workdir"
+        return 1
+    }
+    _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || {
+        "$_sm_rm" -rf "$_sm_workdir"
+        return 1
+    }
+
+    _sm_target=$(sm_binary_path "$_sm_plugin_dir")
+    if ! "$_sm_mv" -f "$_sm_workdir/showmesh-fpp-plugin" "$_sm_target"; then
+        sm_log_err "could not install binary to $_sm_target"
+        "$_sm_rm" -rf "$_sm_workdir"
+        return 1
+    fi
+    "$_sm_rm" -rf "$_sm_workdir"
+
+    if ! "$_sm_chmod" 0755 "$_sm_target"; then
+        sm_log_err "could not set permissions on $_sm_target"
+        return 1
+    fi
+    sm_verify_mode "$_sm_target" 755 || return 1
+
+    if ! "$_sm_chown" fpp:fpp "$_sm_target"; then
+        sm_log_err "could not set ownership of $_sm_target to fpp:fpp"
+        return 1
+    fi
+
+    # See sm_arch_stamp_path's comment: this is what lets preStart.sh
+    # catch a cloned-image, wrong-architecture binary that an [ -x ] check
+    # alone cannot distinguish from a healthy install.
+    if ! printf '%s\n' "$_sm_arch" > "$(sm_arch_stamp_path "$_sm_plugin_dir")"; then
+        sm_log_err "could not write architecture stamp for $_sm_target"
+        return 1
+    fi
 
     sm_log "installed showmesh-fpp-plugin $_sm_version ($_sm_arch) to $_sm_target"
     return 0
 }
 
-# Best-effort only: asks FPP to pick up the new commands/descriptions.json
-# through its own restart-flag mechanism rather than a direct service
-# restart. This endpoint has not been confirmed against a running FPP
-# instance (see README.md), so a failure here is logged and never aborts
-# the install — a fresh command definition that needs a later FPP restart
-# to appear is a much smaller problem than an install that reports failure
-# for a cosmetic reason.
-sm_request_fpp_restart_flag() {
-    local _sm_curl
-    _sm_curl=$(sm_resolve_bin curl /usr/bin/curl /bin/curl 2>/dev/null)
-    if [ -z "$_sm_curl" ]; then
-        return 0
-    fi
-    if ! "$_sm_curl" -fsS -m 5 -X POST "http://localhost/api/settings/restartFlag" \
-        -H 'Content-Type: application/json' -d '{"value":"1"}' >/dev/null 2>&1
-    then
-        sm_log "could not set FPP's restart flag automatically; the new command may need a manual restart of FPP to appear (use FPP's own restart control, never systemctl restart fppd)"
-    fi
+# Deliberately does not touch FPP at all. The first version of this
+# function called FPP's restart-flag endpoint automatically on every
+# install and upgrade, reasoned about only in the failing case ("it's
+# fine if this call fails, a manual restart works too"). The case that
+# was never examined is the call *succeeding* on a host that is currently
+# running a live show: what setting that flag actually does at that
+# moment — an immediate restart, a deferred one, or purely advisory — has
+# not been confirmed against a running instance, and this project's
+# standing rule is no restart and no settings change against a live show
+# without that confirmation. An unattended install or upgrade is exactly
+# the context where nobody is watching to catch a bad outcome. So this
+# function only logs; it is the operator's call, made with eyes open,
+# never this script's.
+sm_note_possible_restart_need() {
+    sm_log "a new or changed command definition may need FPP to restart before it appears in the UI or GET /api/commands. This installer does not do that automatically — what FPP's restart-flag setting does on a host that may be running a live show has not been confirmed, so restart FPP yourself when convenient (never systemctl restart fppd; use FPP's own restart control)."
     return 0
 }
 
@@ -163,7 +263,7 @@ sm_install_or_upgrade() {
 
     sm_ensure_config_scaffold || return 1
     sm_install_binary "$_sm_plugin_dir" "$_sm_fppdir" "$_sm_version" || return 1
-    sm_request_fpp_restart_flag
+    sm_note_possible_restart_need
 
     return 0
 }

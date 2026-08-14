@@ -1,3 +1,13 @@
 .DS_Store
 *.swp
 *~
+
+# The installed binary and its architecture stamp are written by
+# scripts/fpp_install.sh into this repository's own working tree on a real
+# FPP host (the "plugin directory" IS a clone of this repo). Neither is
+# ever committed, but both must still be ignored explicitly: FPP 9.x's
+# upgrade path runs `git clean -fd` as part of its own fallback, and an
+# untracked binary sitting in a git working tree with no matching
+# .gitignore entry is exactly what that command is aimed at.
+/showmesh-fpp-plugin
+/.installed-arch

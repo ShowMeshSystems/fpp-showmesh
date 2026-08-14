@@ -47,7 +47,24 @@ here, not a rebuild.
 
 **Verification is not optional.** The installer downloads both the tarball
 and its checksum manifest and refuses to install anything whose SHA-256
-does not match the manifest entry for its exact filename.
+does not match the manifest entry for its exact filename. Be precise
+about what that buys: both files come from the same base URL, there is no
+digest pinned anywhere in this repository independent of that fetch, and
+no second origin cross-checks either one. This is not a defense against a
+compromised or redirected host serving a consistent, self-signed pair of
+bad bytes and a matching bad manifest. It catches transport corruption
+and a tarball tampered with after the manifest was fetched — which is
+what clears the registry's `unverified-package-install` finding, and no
+more than that.
+
+**The default URL above resolves to nothing today.** CI for the binary
+this installer fetches builds and self-verifies all three architectures'
+artifacts, and — by the owner's decision — publishes none of them yet.
+So a fresh install against the default host, with no override set, will
+fail at the download step until a release is actually published. The
+bench override below is not a convenience right now; it is the only
+working path. Publication is enabled when the plugin first targets real
+hardware.
 
 ### The bench override
 
@@ -57,6 +74,14 @@ test artifact host instead of a public release. **Only the host varies.**
 The filenames, the tag format, the manifest format, and the verification
 step are identical whether this variable is set or not — there is no
 separate bench-only code path to keep in sync with the real one.
+
+The override must still carry an explicit `http://` or `https://` scheme
+— a bare host with no scheme is rejected rather than silently mishandled.
+A plain `http://` override is accepted (the bench needs it) but logged
+plainly rather than passed through silently, since the default host is
+always `https://` and a scheme-downgraded override should be visible in
+the install log, not just in the URL string a human would have to go
+looking for.
 
 ## Never `uname -m` for architecture selection
 
@@ -73,11 +98,27 @@ If the two disagree, the installer refuses to guess and names both
 readings in its error message rather than silently shipping an artifact
 that will not execute.
 
+**This method answers exactly one question — 64-bit kernel hiding a
+32-bit userspace — and no other.** It cannot distinguish ARM instruction
+set *versions*: the ELF class byte is a 32- vs 64-bit flag, not an ARMv6
+vs ARMv7 flag. A first pass of this file ran ARMv6 hosts (`uname -m`
+reporting `armv6l` directly — a Pi 1 or Pi Zero) through the same
+disambiguation path as `aarch64`, found "agreement" at 32-bit, and
+answered `armv7` — the one answer certainly wrong for that hardware, from
+the one module whose entire premise is refusing to guess. `armv6l` is now
+refused outright, before any probing, and a literal `armv7l` report from
+the kernel is answered directly with no probing at all, because a 32-bit
+kernel cannot itself be hiding a 64-bit userspace — the ambiguity this
+method resolves only exists for a 64-bit kernel report.
+
 ## Repository layout
 
 ```
 pluginInfo.json              FPP's plugin manifest (strict JSON)
 VERSION                      the release version scripts/fpp_install.sh fetches
+docs/
+  bench-capture-fpp-9.5.3.md  file paths, line numbers, and quoted source for every
+                              claim below marked "confirmed against FPP 9.5.3"
 commands/
   descriptions.json          registers the "ShowMesh: Run Macro" command (a JSON array)
   run-macro.sh                the script FPP forks to fire a macro run — lives here,
@@ -89,15 +130,17 @@ scripts/
   fpp_uninstall.sh           removes everything this plugin created outside its own directory
   preStart.sh                cheap repair check at fppd startup; a no-op in the common case
   lib/
-    common.sh                 absolute-path tool resolution, logging, shared paths
-    arch.sh                    the two-signal architecture probe
-    fetch.sh                   artifact naming and download
+    common.sh                 absolute-path tool resolution, logging, shared paths, mode/owner verification
+    arch.sh                    the two-signal architecture probe, plus the arch-stamp comparison
+    fetch.sh                   artifact naming, download, base-URL scheme enforcement
     verify.sh                  checksum verification
     commands.sh                validates descriptions.json against the scripts it names
     install-core.sh            the shared install/upgrade body
 test/
-  run_tests.sh                unit tests for the arch probe, checksum verification,
-                              and command-script validation
+  run_tests.sh                unit tests: arch probe, checksum verification, command-script
+                              validation, sm_fppdir, URL scheme, mode verification, the
+                              preStart.sh repair-decision function, committed executable
+                              bits, and this repo's own shipped descriptions.json
 ```
 
 ## What each script does
@@ -108,30 +151,43 @@ test/
   executable (see below), entirely locally and before any network access.
   Then detects the host architecture, downloads the matching tarball and
   checksum manifest, verifies the checksum, extracts and installs the
-  binary at mode `0755`, and creates the plugin's local state directory
-  and files if they do not already exist. Never overwrites an existing
-  credential or config on a re-run.
+  binary at mode `0755`, and creates the plugin's credential directory and
+  non-secret state directory (two separate locations — see "Paths" below)
+  and their files if they do not already exist. Never overwrites an
+  existing credential or config on a re-run.
 - **`fpp_upgrade.sh`** — the same core as install, including the same
   command-script validation. FPP 10 calls this first on upgrade; FPP 9.x
   and earlier ignore it entirely and call `fpp_install.sh` again instead,
   so this script is purely additive.
 - **`fpp_uninstall.sh`** — FPP deletes the plugin directory itself
   regardless of what this script returns, so this script's only job is
-  everything outside that directory: the plugin's config directory,
-  including its credential file. Idempotent; a second run, or a run
-  against a host where install never completed, exits `0`.
-- **`preStart.sh`** — runs at every `fppd` start. Checks whether the binary
-  is present and executable and exits immediately if so — the common case
-  must cost nothing on every boot. Only on a missing or non-executable
-  binary (for example, an SD card image cloned from a host of a different
-  architecture) does it re-run the fetch-and-verify path.
+  everything outside that directory. That is now **two** separate
+  locations, not one (see "Paths" below for why they are split): the
+  credential directory and the non-secret state directory. Idempotent; a
+  second run, or a run against a host where install never completed,
+  exits `0`.
+- **`preStart.sh`** — runs at every `fppd` start, and its two checks are
+  both purely local (a file test, plus a handful of local file reads for
+  architecture detection — never the network), so they cost nothing on
+  every boot; only an actual repair reaches the network. It repairs on
+  either of two conditions: the binary missing or not executable at all,
+  or the binary present and executable but stamped with a different
+  architecture than a fresh detection now reports — exactly what a disk
+  image cloned from a host of a different architecture produces, and a
+  case a plain `[ -x ]` check cannot see (a cloned binary is present and
+  executable; it is just wrong). A repair re-runs the full install/
+  upgrade path, not only the binary fetch, so it also re-scaffolds
+  permissions, and its network calls use a much tighter timeout budget
+  than a foreground, human-initiated install, since this blocks `fppd`
+  starting and must not eat minutes of a networkless boot.
 - **`commands/run-macro.sh`** — the script FPP forks when the registered
   `ShowMeshRunMacro` command fires. Locates the installed binary and execs
-  `showmesh-fpp-plugin run --config-dir <configdir> <macroId>`; every
+  `showmesh-fpp-plugin run --config-dir <statedir> -- <macroId>`; every
   command execution FPP fires is published in cleartext to its own MQTT
   `command/run` topic, so no credential is ever passed as a command
   argument, and the binary's credential path is not configurable at all
-  (see below).
+  (see below). The `--` before the macro id keeps an id that happens to
+  start with a hyphen from being misread as a flag.
 
 ## A wrong `script` filename makes a command silently vanish
 
@@ -162,17 +218,60 @@ here to prevent happening again, silently, on a real host.
 
 ## Paths this repository assumes about the installed plugin
 
-- Config directory: `/home/fpp/media/config/plugin.fpp-showmesh/`
-- Credential file: `<configdir>/credential`, mode `0600`, owned `fpp:fpp`,
-  created empty by the installer and left for separate provisioning — this
-  repository does not put a real credential on the host. Its path is not
-  configurable: the binary always reads `<configdir>/credential` and
-  accepts no flag or environment variable to point it anywhere else, so
-  there is exactly one place on the host a token can end up.
-- `<configdir>/config.json`, `status.json`, `failures.json`,
-  `macro-cache.json` — created with empty defaults if absent, never
-  overwritten if present
-- The binary itself, installed to the plugin directory at mode `0755`
+The credential and the plugin's other state live in **two separate
+locations**, not one — this changed during review, and the reason is
+worth stating rather than just the new paths. FPP serves its own
+`media/config/` tree **unauthenticated** over its own HTTP API: a `GET`
+returns file contents with no credential check, and an unauthenticated
+`POST` to the same endpoint can create subdirectories under it. A
+credential living anywhere under that tree is one unauthenticated request
+away from anything that can reach the FPP web UI — a strictly worse
+exposure than the general cleartext-on-the-show-LAN posture this project
+otherwise accepts for commands and telemetry, which is tolerated
+specifically because it does not extend to secrets. `/etc` is outside
+everything FPP's API serves, so the credential moved there and out of
+FPP's tree entirely.
+
+- **Credential directory:** `/etc/showmesh-fpp-plugin/`, mode `0700`,
+  owned `fpp:fpp`.
+- **Credential file:** `/etc/showmesh-fpp-plugin/credential`, mode `0600`,
+  owned `fpp:fpp`, created empty by the installer and left for separate
+  provisioning — this repository does not put a real credential on the
+  host. Its path is not otherwise configurable: the binary always reads
+  from exactly this file. (An earlier version of this document claimed
+  this was true of the *whole* config directory and that there was
+  "exactly one place on the host a token can end up" — that was false even
+  at the time, since the binary's config-directory resolution has always
+  accepted a flag, an environment variable, and a `MEDIADIR`-derived
+  fallback ahead of a literal default. Only the credential's own path was
+  ever fixed; the sentence overstated it to the whole directory. Splitting
+  the credential out to a location with no resolution chain at all is
+  what actually makes a strong version of that sentence true, and this is
+  it.)
+- **State directory:** `/home/fpp/media/plugindata/fpp-showmesh/`, mode
+  `0700`, owned `fpp:fpp` — non-secret plugin state, staying under FPP's
+  media tree since none of it is a credential.
+- `<statedir>/config.json`, `status.json`, `failures.json`,
+  `macro-cache.json` — created at mode `0600`, owned `fpp:fpp`, with empty
+  defaults if absent, never overwritten if present. (0600 to match what
+  the binary itself uses when it rewrites these files — an earlier version
+  of the scaffold created them at `0644`, disagreeing with the binary from
+  the moment install finished; picked one mode rather than leaving that
+  standing.)
+- The binary itself, installed to the plugin directory at mode `0755`.
+- `.installed-arch`, alongside the binary in the plugin directory —
+  records which architecture was actually fetched, so `preStart.sh` can
+  compare a fresh detection against it (see above). Gitignored, like the
+  binary itself.
+
+Every `chown` and `chmod` in the scaffold is checked, and every `chmod` is
+followed by reading the mode back rather than trusting the exit code
+alone — a vfat or exFAT mount (FPP explicitly supports running its media
+directory from a USB stick) reports `chmod` as successful while actually
+deriving every file's mode from mount options, silently ignoring the
+request. Catching that at install time is the difference between a clear
+install failure and the binary refusing to start at showtime because a
+0600 credential file measures as something else entirely.
 
 These paths, and the artifact contract above, are a pinned interface
 between this repository and the binary it fetches. A change to either side
@@ -180,19 +279,21 @@ needs to change both.
 
 ## The command hand-off, and what is and is not pinned
 
-The binary's invocation contract is now pinned by the team building it:
-`showmesh-fpp-plugin run <macroId>`, with the config directory resolved by
-the binary itself in order — a `--config-dir` flag, then
-`SHOWMESH_FPP_PLUGIN_CONFIG_DIR`, then `${MEDIADIR}/config/plugin.fpp-showmesh`,
-then the literal `/home/fpp/media/config/plugin.fpp-showmesh`.
+The binary's invocation contract is pinned by the team building it:
+`showmesh-fpp-plugin run --config-dir <statedir> -- <macroId>`.
 `commands/run-macro.sh` passes `--config-dir` explicitly with this
-repository's own pinned config path, so the binary reads from exactly
-where the installer scaffolds state regardless of what `MEDIADIR` resolves
-to on a given host, rather than depending on the two matching. That choice
-— passing the flag rather than relying on the binary's own `MEDIADIR`
-fallback — is this repository's own decision, not something confirmed
-against a running install; everything else in the invocation (subcommand
-name, positional argument, the absence of any credential flag) is pinned.
+repository's own pinned state directory (see "Paths" above), so the binary
+reads its non-secret config/status/failures/macro-cache files from exactly
+where the installer scaffolds them, rather than depending on the binary's
+own `MEDIADIR`-based resolution to land on the same place independently.
+That choice — passing the flag rather than relying on the fallback — is
+this repository's own decision, not something confirmed against a running
+install. The credential is not part of `--config-dir` at all and has no
+flag or resolution chain of its own: the binary reads it from one fixed
+location (see "Paths" above), which is deliberate — a resolution chain is
+exactly the kind of indirection that makes "where could this secret end up"
+a harder question to answer, and the whole point of moving the credential
+out of FPP's tree was to make that question have one answer.
 
 ## What has been verified, and what has not
 
@@ -202,7 +303,9 @@ would make the weaker one sound better than it is.
 
 **Read from FPP 9.5.3's own source and confirmed against a running
 containerized instance of it**, and nothing else stated in this README
-carries that weight:
+carries that weight. `docs/bench-capture-fpp-9.5.3.md` is the committed
+record of exactly which file, line, and quoted source each of these rests
+on, so this list is checkable rather than asserted:
 
 - `commands/descriptions.json`'s schema — a top-level JSON array, `name`
   and `script` are the only fields FPP's own code reads, `script` is
@@ -219,39 +322,110 @@ carries that weight:
 - `preStart.sh`'s invocation: `/bin/bash <file>` with no arguments,
   inheriting `fppd_start`'s environment rather than the exec environment
   above.
+- **How `FPPDIR` actually arrives at `fpp_install.sh`/`fpp_upgrade.sh`,
+  and it is two different shapes, not one.** A fresh install
+  (`scripts/install_plugin`) passes `FPPDIR=<dir>` as a literal argv
+  word — not a shell assignment — with nothing exported. An upgrade
+  (`www/api/controllers/plugin.php`) instead exports `FPPDIR` before
+  invoking `sudo -E`, with `$1` arriving empty. `sm_fppdir` in
+  `scripts/lib/common.sh` checks the environment first, then strips a
+  `FPPDIR=` prefix from `$1`, then falls back to `/opt/fpp`, specifically
+  because neither source alone covers both of FPP's own callers.
+- **`sudo -E` preserves the environment across the Plugin Manager's own
+  `sudo` call; it does not strip it.** This corrects a Fact previously
+  recorded in this project's plugin-distribution research, which stated
+  that the Plugin Manager "exports bare `sudo` rather than `sudo -E`,
+  stripping the exported values." That was true of the fresh-install path
+  only (which never exports `FPPDIR` regardless of `sudo -E`) and false of
+  the upgrade path (which does export it, via exactly the `sudo -E` call
+  the original Fact said did not happen). This repository's first pass
+  built a rule directly on the stronger, false version — "never read
+  `$FPPDIR` from the environment" — which forbade the one mechanism that
+  actually works on the upgrade path. The rule is gone; both sources are
+  checked now, in the order above.
 
 **Still unverified, and this work does not change that**: the on-host
-install path end to end, filesystem permissions on a real image, behavior
-across an actual FPP major-version upgrade, whether the candidate `fppd`
-and dynamic-linker paths `scripts/lib/arch.sh` probes are correct on a
-real Pi, BeagleBone, or PocketBeagle image, and the exact endpoint used to
-ask FPP to pick up a new command definition (`fpp_install.sh`'s
-best-effort, non-fatal call to `http://localhost/api/settings/restartFlag`
-— read nowhere, confirmed nowhere, and written to fail quietly rather than
-block an install over it).
+install path end to end, filesystem permissions and mount-option
+interactions on a real image, behavior across an actual FPP major-version
+upgrade, whether the candidate `fppd` and dynamic-linker paths
+`scripts/lib/arch.sh` probes are correct on a real Pi, BeagleBone, or
+PocketBeagle image, and whether `fpp:fpp` ownership and the credential/
+state directory scaffold actually succeed against a real `fpp` system
+user (nothing on this developer machine has one, so the scaffold's
+`chown` calls have only been exercised as far as confirming they fail
+loudly rather than silently, never as far as confirming they succeed).
+Also still unverified: what FPP's restart-flag setting actually does when
+called on a host that may be running a live show — which is exactly why
+`sm_note_possible_restart_need` in `scripts/lib/install-core.sh` no longer
+calls it automatically at all, and only logs a message telling the
+operator to restart FPP themselves. The first version of this function
+called that endpoint unattended and reasoned about only the failing case;
+the case that was never examined was the call *succeeding* mid-show, and
+without a confirmed answer for what that does, an unattended install or
+upgrade is exactly the context where a bad outcome would go uncaught.
+
+Also unverified in a different sense: `pluginInfo.json` declares support
+from FPP 8.4 through a full FPP 10.x entry, but the bench evidence above
+covers 9.5.3 only. The 9.x floor is grounded in a separate, prior,
+source-verified finding that FPP's install/uninstall scripts are
+byte-identical across the whole 8.4–9.4 range, which is why one `versions[]`
+entry for that whole regime is a defensible claim rather than a guess.
+**The FPP 10 entry carries no equivalent grounding.** FPP 10 restructures
+install into two phases with a dependency-resolution callback and honors
+`fpp_upgrade.sh` first rather than ignoring it — a genuinely different
+install regime, none of which has been exercised here even at the source-
+read level this section otherwise credits. The entry is kept because an
+open-ended `maxFPPVersion` silently degrades to major-scoped and hidden
+rather than erroring when a new FPP major appears, so omitting an FPP 10
+entry is not a neutral choice either; keeping it and stating the limit
+here is the honest version of keeping it silently.
 
 What has been exercised, directly and repeatedly, on this machine, without
 any FPP host involved:
 
 - The architecture probe's ELF-class and dynamic-linker-presence logic,
-  including the disagreement case in both directions, against synthetic
+  including the disagreement case in both directions, the `armv6l`
+  refusal, and the `armv7l` direct-answer path, against synthetic
   fixtures.
+- The `preStart.sh` repair-decision function (`sm_arch_repair_reason`)
+  against a matching stamp, a mismatched stamp, no stamp at all, and a
+  failed fresh detection — each producing the right decision and, for the
+  mismatch case, a message naming both architectures.
+- `sm_fppdir` against all four combinations of the two FPP calling
+  conventions above, plus the case where both happen to be present.
 - Checksum verification, including a genuinely tampered artifact and a
   missing manifest entry, both rejected.
 - Command-script validation: a script that exists and is executable, one
   that is missing, one that exists but is not executable, and a missing
-  `descriptions.json`, each producing a distinguishable message.
+  `descriptions.json`, each producing a distinguishable message — run both
+  against synthetic fixtures and against this repository's own shipped
+  `commands/descriptions.json` and `commands/run-macro.sh`, so the exact
+  save that caught the `scripts/`-vs-`commands/` placement bug during this
+  repository's own development is now a standing check rather than a
+  one-time one.
+- Base URL scheme enforcement: `https://` accepted silently, `http://`
+  accepted but logged, no scheme and an unrecognized scheme both rejected.
+- Mode verification (`sm_verify_mode`) against a mode that was actually
+  set, a mode that was not, and a nonexistent path.
+- Every entrypoint script's and library file's executable bit as recorded
+  in git, so a lost `chmod +x` on any of them — including on
+  `fpp_install.sh` itself, whose loss would silently skip everything else
+  in this list on a real host — fails the suite rather than waiting to be
+  discovered on a Pi.
 - The full fetch → verify → extract → place pipeline, end to end, against
   a local HTTP server standing in for a release host, including its
-  refusal of a tampered download.
+  refusal of a tampered download, and including confirming the installed
+  binary's mode reads back as `0755`.
 - `commands/run-macro.sh` run directly under a synthetic environment
   matching the confirmed exec contract exactly (`env -i` plus only
   `SCRIPTDIR`, `MEDIADIR`, `FPPDIR`), including the no-`SCRIPTDIR` fallback
   path and the missing-argument case.
 
-`test/run_tests.sh` covers the first three. Running it does not require
-FPP, root, or any of the paths above to exist; see the script for how it
-stubs kernel and filesystem probes without touching real system paths.
+`test/run_tests.sh` covers everything except the last two, which were
+checked by hand against a local HTTP server and are not yet part of the
+automated suite. Running the suite does not require FPP, root, or any of
+the paths above to exist; see the script for how it stubs kernel and
+filesystem probes without touching real system paths.
 
 None of this raises the plugin-distribution research record's evidence
 level. It stays at what a bench container and a source read can support;

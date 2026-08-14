@@ -2,10 +2,22 @@
 # Checksum verification for the downloaded release artifact.
 #
 # Verification is not optional: a `chmod +x` of a downloaded file with no
-# checksum check is a finding that blocks a first listing in FPP's plugin
-# registry, and it is also the actual point — this file is what stands
-# between "fetched from a URL an environment variable can redirect" and
-# "known to be the bytes that were published".
+# checksum check is a Best-practice-severity finding that blocks a first
+# listing in FPP's plugin registry, and clearing it is what this file is
+# for.
+#
+# Be precise about what this buys and what it does not. The tarball and
+# its checksum manifest are fetched from the same base URL (see
+# sm_artifact_base_url in fetch.sh), there is no digest pinned anywhere in
+# this repository independent of that fetch, and no second origin cross-
+# checks either file. So this is NOT a defense against a compromised or
+# redirected host serving a consistent, self-signed pair of bad bytes and
+# a matching bad manifest — a host controlling both files can make them
+# agree with each other regardless of what they actually contain. What it
+# genuinely catches is transport corruption and a tampered-in-transit
+# tarball that no longer matches a manifest fetched (and trusted) as a
+# separate step, which is exactly the registry finding it clears and no
+# more than that.
 #
 # Requires scripts/lib/common.sh to already be sourced.
 

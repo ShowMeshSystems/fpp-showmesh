@@ -23,14 +23,22 @@
 # below the plugin root rather than below this file's own directory.
 #
 # The invocation contract below (subcommand name and argument order) is
-# pinned against the binary's actual CLI, confirmed by the team building
-# it: `showmesh-fpp-plugin run <macroId>`. The config directory is passed
-# explicitly with --config-dir so this script's placement of plugin state
-# is authoritative regardless of what MEDIADIR resolves to on a given
-# host, rather than relying on the binary's own MEDIADIR-based fallback.
-# There is no credential flag or variable: the binary always reads the
-# credential from <configdir>/credential and that path is not
-# configurable, deliberately, so there is no way to aim it anywhere else.
+# pinned against the binary's actual CLI: `showmesh-fpp-plugin run
+# <macroId>`. --config-dir is passed explicitly, pointing at this
+# repository's non-secret state directory (sm_state_dir), so the binary
+# reads its config/status/failures/macro-cache files from exactly where
+# the installer scaffolds them regardless of what MEDIADIR resolves to on
+# a given host, rather than relying on the binary's own MEDIADIR-based
+# fallback for that piece. The credential is not part of --config-dir at
+# all: it lives at a separate, fully fixed location
+# (sm_credential_file, currently /etc/showmesh-fpp-plugin/credential)
+# that the binary reads directly and that nothing on this command line
+# points at, because FPP serves its own media/config tree unauthenticated
+# over HTTP and a credential anywhere under it would be one request away
+# from anyone who can reach the FPP web UI.
+#
+# The macro id is passed after a "--" so an id that happens to start with
+# a hyphen is never misread as a flag by the binary's argument parser.
 #
 # Must be committed with the executable bit set (mode 0755).
 
@@ -51,4 +59,4 @@ if [ ! -x "$_sm_binary" ]; then
     exit 1
 fi
 
-exec "$_sm_binary" run --config-dir "$(sm_config_dir)" "$_sm_macro_id"
+exec "$_sm_binary" run --config-dir "$(sm_state_dir)" -- "$_sm_macro_id"

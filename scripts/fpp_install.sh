@@ -3,8 +3,12 @@
 # again on every upgrade on FPP 9.x and earlier (which does not honour
 # fpp_upgrade.sh at all). It must be safe to re-run.
 #
-# FPPDIR is passed as $1, positionally only — never read $FPPDIR from the
-# environment, the Plugin Manager runs bare `sudo` and strips it.
+# FPPDIR arrives differently depending on which of FPP's own two callers
+# ran this script — as a literal "FPPDIR=<dir>" argv word on a fresh
+# install, or exported into the environment (via sudo -E) on an upgrade —
+# and never both at once. sm_fppdir in lib/common.sh checks both; see its
+# comment and lib/common.sh's file header for the confirmed source read
+# this corrects. Do not shortcut it by reading $1 or $FPPDIR directly here.
 #
 # Must be committed with the executable bit set (mode 0755); a script
 # committed at 0644 is silently skipped with nothing surfaced in FPP's UI.

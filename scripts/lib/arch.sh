@@ -101,6 +101,24 @@ sm_uname_m() {
 # Prints one of: amd64, arm64, armv7. Non-zero exit and a stderr message on
 # anything it cannot resolve confidently, including the two detection
 # methods disagreeing.
+#
+# The two-signal ELF-class / dynamic-linker probe below exists to answer
+# exactly one question: does a 64-bit kernel (uname -m reporting aarch64)
+# hide a 32-bit (armhf) userspace? It is run only for that case. A literal
+# 32-bit report from the kernel needs no disambiguation at all — a 32-bit
+# kernel cannot run a 64-bit userspace, so armv7l is unambiguous on its
+# own. And the probe cannot answer a different question it looks similar
+# to: which ARM instruction set version is present. EI_CLASS is a 32- vs
+# 64-bit bit-width flag; it says nothing about ARMv6 vs ARMv7, and this
+# project ships one 32-bit ARM artifact, built with GOARM=7. A first pass
+# of this file grouped armv6l into the same "needs disambiguation" branch
+# as aarch64 and armv7l, which meant a genuine ARMv6 host (a Pi 1 or Pi
+# Zero, uname -m reporting armv6l directly) would resolve through this
+# probe, find a 32-bit ELF class and no aarch64 linker, call that
+# "agreement", and answer armv7 — the one answer that is certainly wrong
+# for that hardware, from the one module whose entire premise is refusing
+# to guess. GOARM=7 code executes an illegal instruction on real ARMv6
+# silicon. armv6l is now refused outright, explicitly, before any probing.
 sm_detect_arch() {
     local _sm_fppdir _sm_machine _sm_fpp_bin _sm_class _sm_linker_says
     _sm_fppdir="$1"
@@ -108,20 +126,38 @@ sm_detect_arch() {
 
     case "$_sm_machine" in
         x86_64)
-            # No known FPP host runs 32-bit x86; the kernel/userspace
-            # word-size split that motivates the ARM disambiguation below
-            # does not apply here.
+            # Not "no known FPP host runs 32-bit x86" — that would be a
+            # claim about the world, stated as fact with no citation, in
+            # the one file whose subject is refusing to trust unverified
+            # signals. This is a scope decision instead: the artifact
+            # contract this repository fetches from ships amd64, arm64,
+            # and armv7 only, so a 32-bit x86 host is out of scope
+            # regardless of whether one exists anywhere, and amd64 is
+            # answered from the kernel report alone because x86 has no
+            # analogue of the aarch64-hides-armhf trap this file exists
+            # to defend against.
             printf 'amd64\n'
             return 0
             ;;
-        aarch64|armv6l|armv7l|arm*)
+        armv7l)
+            # Unambiguous on its own; see the note above the function.
+            printf 'armv7\n'
+            return 0
+            ;;
+        armv6l)
+            sm_log_err "kernel reports armv6l (ARMv6 hardware, e.g. Pi 1 or Pi Zero); this project ships no armv6 artifact, and the ELF-class/linker-presence method cannot tell ARMv6 from ARMv7 in the first place — both are 32-bit ELF with no aarch64 linker. Refusing rather than shipping a GOARM=7 build that would fault with an illegal instruction on real ARMv6 silicon."
+            return 1
+            ;;
+        aarch64)
             ;;
         *)
-            sm_log_err "unrecognized kernel machine type from uname -m: $_sm_machine"
+            sm_log_err "unrecognized or unsupported kernel machine type from uname -m: $_sm_machine"
             return 1
             ;;
     esac
 
+    # Only aarch64 reaches here: the one case where the kernel's own word
+    # size does not by itself tell us the FPP userspace's word size.
     _sm_fpp_bin=$(sm_find_fpp_binary "$_sm_fppdir") || return 1
 
     if ! sm_elf_magic_ok "$_sm_fpp_bin"; then
@@ -147,4 +183,44 @@ sm_detect_arch() {
     else
         printf 'armv7\n'
     fi
+}
+
+# Extracted out of preStart.sh rather than left inline there, specifically
+# so it can be unit tested: a script run as a fresh subprocess cannot have
+# sm_uname_m shadowed by a test the way every other arch.sh function in
+# this suite is exercised, since POSIX sh has no portable way to export a
+# function into a child process. As a plain sourced function, this one can.
+#
+# Prints a non-empty reason on stdout if this host's freshly detected
+# architecture disagrees with the architecture stamped at the plugin's
+# last successful install ($1/.installed-arch, written by
+# sm_install_binary), and prints nothing otherwise. "Otherwise" covers
+# three different cases deliberately treated the same way: the stamp and
+# a fresh detection agree; there is no stamp at all (most likely a binary
+# installed by a version of this repository before the stamp existed,
+# which resolves itself on the next real install or upgrade); and fresh
+# detection itself fails right now, which is not evidence the installed
+# binary is wrong — it is evidence detection cannot currently answer,
+# and guessing wrong there would trigger the exact kind of unnecessary,
+# network-bound repair this function exists to gate precisely.
+sm_arch_repair_reason() {
+    local _sm_plugin_dir _sm_fppdir _sm_stamp _sm_stamped_arch _sm_current_arch
+    _sm_plugin_dir="$1"
+    _sm_fppdir="$2"
+
+    _sm_stamp=$(sm_arch_stamp_path "$_sm_plugin_dir")
+    _sm_stamped_arch=""
+    if [ -f "$_sm_stamp" ]; then
+        _sm_stamped_arch=$(cat "$_sm_stamp" 2>/dev/null)
+    fi
+    if [ -z "$_sm_stamped_arch" ]; then
+        return 0
+    fi
+
+    _sm_current_arch=$(sm_detect_arch "$_sm_fppdir" 2>/dev/null) || return 0
+
+    if [ "$_sm_current_arch" != "$_sm_stamped_arch" ]; then
+        printf 'installed binary was built for %s, but this host now detects as %s — this is exactly what a disk image cloned from a different-architecture host produces\n' "$_sm_stamped_arch" "$_sm_current_arch"
+    fi
+    return 0
 }
