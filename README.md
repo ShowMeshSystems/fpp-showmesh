@@ -68,10 +68,8 @@ nothing in the installer treats it as authoritative any more; see
 this installer fetches builds and self-verifies all three architectures'
 artifacts, and — by the owner's decision — publishes none of them yet.
 So a fresh install against the default host, with no override set, will
-fail at the download step until a release is actually published. The
-bench override below is not a convenience right now; it is the only
-working path. Publication is enabled when the plugin first targets real
-hardware.
+fail at the download step until a release is actually published.
+Publication is enabled when the plugin first targets real hardware.
 
 ### The bench override
 
@@ -81,6 +79,23 @@ test artifact host instead of a public release. **Only the host varies.**
 The filenames, the tag format, the manifest format, and the verification
 step are identical whether this variable is set or not — there is no
 separate bench-only code path to keep in sync with the real one.
+
+**Pointing this at a bench host is not, by itself, enough to make a bench
+install pass.** `artifacts.lock.json` as committed to this repository
+right now carries all-zero placeholder `sha256` values for every artifact
+(see the lock file's own `"note"` field), deliberately, so an install can
+never silently trust an unverified hash. Verification is against this
+committed lock, never against anything fetched from the bench host itself
+(see "The artifact contract" above), so a bench install against a real
+tarball fails the checksum check every time until the lock is
+regenerated for that tarball. There is no tooling in this repository that
+does that regeneration automatically; it means hand-editing
+`artifacts.lock.json`'s `artifacts[]` array so each entry's `sha256` is
+the real digest of the bench tarball it names (`sha256sum` against the
+actual file the bench host serves, or the real per-artifact digest from
+whatever built and published that tarball) and its `version` matches the
+`VERSION` file at this repository's root. Do this before attempting a
+bench install, not after one fails confusingly on a checksum mismatch.
 
 The override must still carry an explicit `http://` or `https://` scheme
 — a bare host with no scheme is rejected rather than silently mishandled.
@@ -149,10 +164,11 @@ scripts/
     install-core.sh            the shared install/upgrade body
 test/
   run_tests.sh                unit tests: arch probe, checksum verification, lock lookup,
-                              stage/activate rollback, command-script validation, sm_fppdir,
-                              URL scheme, mode verification, the preStart.sh repair-decision
-                              function, committed executable bits, and this repo's own
-                              shipped descriptions.json
+                              stage/activate rollback, the sm_install_binary / sm_install_or_upgrade
+                              pipeline end to end (network calls shadowed), command-script
+                              validation, sm_fppdir, URL scheme, mode verification, the
+                              preStart.sh repair-decision function, committed executable
+                              bits, and this repo's own shipped descriptions.json
 ```
 
 ## What each script does
@@ -423,11 +439,29 @@ any FPP host involved:
   installed, and the compromised-host case: a downloaded tarball and a
   downloaded `SHA256SUMS` that agree with each other but disagree with the
   committed lock, rejected on the lock's authority, not the manifest's.
-- Stage-then-swap binary activation (`sm_stage_binary`, `sm_activate_binary`):
-  a clean fresh install with no previous binary, a failure injected during
-  post-staging validation (mode/ownership) leaving the previous binary
-  untouched, and a failure injected in the atomic-rename swap itself after
-  staging succeeded, rolling the previous binary back into place.
+- Stage-then-swap binary activation (`sm_stage_binary`, `sm_activate_binary`,
+  `sm_activate_commit`, `sm_activate_rollback`): a clean fresh install with
+  no previous binary, a failure injected during post-staging validation
+  (mode/ownership) leaving the previous binary untouched, a failure
+  injected in the atomic-rename swap itself after staging succeeded (the
+  previous binary is left exactly as it was, since a failed rename never
+  touches its destination, so no separate rollback rename happens or is
+  needed), and `sm_activate_rollback` itself restoring the preserved
+  previous binary after a failure that happens after the swap already
+  succeeded.
+- `sm_install_binary` and `sm_install_or_upgrade`, end to end, with
+  `sm_detect_arch` and `sm_download` shadowed so nothing here touches the
+  network: a clean fresh install; a lock hash that disagrees with the
+  served bytes, refused with the previous binary surviving byte-identical
+  and executable; a fresh install whose swap fails, leaving nothing
+  half-installed; and a post-activation failure (the arch-stamp write)
+  rolling the live binary back to what was running before the install
+  started: the transaction boundary the "previous binary deleted before
+  last failable steps" finding closed. `sm_install_or_upgrade`'s own
+  orchestration (command-script validation gating the config scaffold,
+  the config scaffold gating the binary install) is exercised with
+  `sm_ensure_config_scaffold` shadowed, so this suite never touches
+  `/etc` or the real plugin state directory on the machine running it.
 - Command-script validation: a script that exists and is executable, one
   that is missing, one that exists but is not executable, and a missing
   `descriptions.json`, each producing a distinguishable message — run both
