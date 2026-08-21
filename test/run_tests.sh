@@ -97,6 +97,19 @@ $2" ;;
     esac
 }
 
+# python3 synthesizes fixture ELF/tarball bytes and every synthetic sha256
+# used throughout this suite; without it, every one of those bare
+# `python3 -c ...` calls below fails but is captured by a `$(...)`
+# command substitution, so the suite kept running with empty fixtures and
+# empty hashes and reported a plain pass/fail count instead of the
+# environment problem that actually caused it. Refusing outright here,
+# before any fixture is built, turns that into a loud, specific failure
+# instead of a quietly degraded run.
+if ! command -v python3 >/dev/null 2>&1; then
+    printf 'FATAL: python3 is required to build this suite'"'"'s fixtures and was not found on PATH\n' >&2
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Fixture generation
 # ---------------------------------------------------------------------------
@@ -650,6 +663,58 @@ if [ "$out" = "$_sm_hash_nested_inner" ]; then
     fail "the nested sha256 is never silently returned" "returned $out, which is the NESTED value, not a refusal"
 else
     pass "the nested sha256 is never silently returned"
+fi
+
+# The case above still has a top-level "sha256" (the outer one) to
+# outnumber the nested one, so the sha_count-gt-1 branch above catches it
+# on its own; the brace-depth check right after it is never actually
+# exercised by that fixture. An entry with a nested "sha256" and NO
+# top-level one at all (only the "meta" object carries the field) is the
+# shape that specifically exercises the brace-depth check: exactly one
+# "sha256" match total, so the count check passes it through, and only
+# the depth check can still refuse it.
+_sm_hash_nested_only=$(python3 -c "print('d' * 64)")
+mkdir -p "$_sm_lockdir-nested-sha256-only"
+cat > "$_sm_lockdir-nested-sha256-only/artifacts.lock.json" <<JSON
+{
+  "version": "1.2.3",
+  "artifacts": [
+    { "filename": "nested-only.tar.gz", "meta": { "sha256": "$_sm_hash_nested_only" } }
+  ]
+}
+JSON
+out=$(sm_lock_sha256 "$_sm_lockdir-nested-sha256-only/artifacts.lock.json" "nested-only.tar.gz" 2>&1)
+status=$?
+assert_failure "an entry whose ONLY sha256 is nested inside another key, with no top-level sha256 at all, is refused" "$status"
+if [ "$out" = "$_sm_hash_nested_only" ]; then
+    fail "the nested-only sha256 is never silently returned" "returned $out, which is the NESTED value, not a refusal"
+else
+    pass "the nested-only sha256 is never silently returned"
+fi
+
+# The brace-depth check above counts `{`/`}` characters in the raw text,
+# which is blind to a brace sitting inside a JSON STRING value rather
+# than acting as real structure. An entry whose only sha256 is nested,
+# preceded by a string field whose VALUE is literally "}", used to
+# understate the open-brace count enough to pass the depth check and
+# return the nested hash at exit 0.
+_sm_hash_nested_string_trap=$(python3 -c "print('9' * 64)")
+mkdir -p "$_sm_lockdir-nested-sha256-string-trap"
+cat > "$_sm_lockdir-nested-sha256-string-trap/artifacts.lock.json" <<JSON
+{
+  "version": "1.2.3",
+  "artifacts": [
+    { "filename": "trap.tar.gz", "note": "}", "meta": { "sha256": "$_sm_hash_nested_string_trap" } }
+  ]
+}
+JSON
+out=$(sm_lock_sha256 "$_sm_lockdir-nested-sha256-string-trap/artifacts.lock.json" "trap.tar.gz" 2>&1)
+status=$?
+assert_failure "a brace character inside a string value does not defeat the nested-sha256 refusal" "$status"
+if [ "$out" = "$_sm_hash_nested_string_trap" ]; then
+    fail "the string-trapped nested sha256 is never silently returned" "returned $out, which is the NESTED value, not a refusal"
+else
+    pass "the string-trapped nested sha256 is never silently returned"
 fi
 
 # The duplicate-filename guard above counts LINES with grep -Fc, which
@@ -1564,6 +1629,37 @@ status=$?
 assert_failure "sm_scaffold_file refuses a directory at its own path" "$status"
 assert_eq "the directory is left exactly as it was, not chowned/chmoded" "" "$(ls -A "$_sm_scaf_dir_at_file_path" 2>/dev/null)"
 
+# --- the "refuses a directory" assertion above only checks a non-zero
+# exit, which `cat` on a directory already supplies on its own with the
+# regular-file guard removed; it does not actually prove the guard is
+# load-bearing. A FIFO at the same path does: with no writer ever opening
+# the other end, `cat` on a FIFO blocks forever, so a planted FIFO in the
+# scaffold path turns the root boot-time repair into a hang instead of a
+# refusal if the regular-file check is ever deleted. This is run in a
+# separate process under a bounded timeout specifically so that if the
+# guard regresses, this suite reports a failure instead of hanging
+# itself. ---
+_sm_mkfifo=$(command -v mkfifo 2>/dev/null || true)
+_sm_timeout_bin=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
+if [ -z "$_sm_mkfifo" ] || [ -z "$_sm_timeout_bin" ]; then
+    skip "sm_scaffold_file refuses a FIFO at its own path rather than blocking on it" "mkfifo(1) or timeout(1)/gtimeout(1) not available"
+else
+    _sm_scaf_fifo_path="$_sm_scafdir/fifo-at-file-path"
+    "$_sm_mkfifo" "$_sm_scaf_fifo_path"
+    out=$("$_sm_timeout_bin" 5 sh -c '
+        . "$1/common.sh"
+        . "$1/install-core.sh"
+        sm_scaffold_file "$2" 0600 "{}"
+    ' _ "$_sm_lib_dir" "$_sm_scaf_fifo_path" 2>&1)
+    status=$?
+    if [ "$status" -eq 124 ]; then
+        fail "sm_scaffold_file refuses a FIFO promptly rather than blocking on it" "timed out (rc=124) reading the FIFO; the regular-file guard did not stop this"
+    else
+        assert_failure "sm_scaffold_file refuses a FIFO at its own path rather than blocking on it" "$status"
+    fi
+    assert_eq "the FIFO is left exactly as it was, not chowned/chmoded" "fifo" "$( [ -p "$_sm_scaf_fifo_path" ] && echo fifo )"
+fi
+
 echo "== sm_create_new_file (noclobber) =="
 
 # The shell's own noclobber option (`set -C`) is what makes the existence
@@ -1969,16 +2065,14 @@ else
         assert_eq "$_sm_entrypoint is committed executable (100755)" "100755" "$_sm_recorded_mode"
     done
 
-    for _sm_libfile in \
-        scripts/lib/common.sh \
-        scripts/lib/arch.sh \
-        scripts/lib/fetch.sh \
-        scripts/lib/verify.sh \
-        scripts/lib/commands.sh \
-        scripts/lib/lock.sh \
-        scripts/lib/activate.sh \
-        scripts/lib/install-core.sh
-    do
+    # Discovered with `find`, the same way the hygiene scan below finds
+    # its own runtime script surface, rather than a hand-maintained list:
+    # a hardcoded list here left a newly added lib file unchecked by
+    # construction, the identical gap this repository already closed one
+    # level up for the bare-tool-call scan.
+    _sm_libfiles=$(find "$_sm_repo_dir/scripts/lib" -maxdepth 1 -type f -name '*.sh' | sort)
+    for _sm_libfile_abs in $_sm_libfiles; do
+        _sm_libfile=${_sm_libfile_abs#"$_sm_repo_dir"/}
         _sm_recorded_mode=$(cd "$_sm_repo_dir" && "$_sm_git" ls-files -s -- "$_sm_libfile" 2>/dev/null | awk '{print $1}')
         assert_eq "$_sm_libfile is committed non-executable (100644, it is only ever sourced)" "100644" "$_sm_recorded_mode"
     done
@@ -2005,6 +2099,76 @@ fi
 # excluded on purpose — it is a dev/CI-only script that legitimately
 # calls tools bare, with a real PATH, and is not one of the three
 # constrained invocation conventions common.sh's header describes).
+# Scrubs a file's own sm_resolve_bin call sites (see the header on the
+# scrub itself, below) and reports every command-position or bare-
+# assignment use of $2 remaining in $1, one per output line. Factored out
+# of the real scan below so the self-test section further down can drive
+# the exact same detection logic against synthetic fixtures instead of
+# only ever exercising it against whatever this repository's own tree
+# happens to contain right now.
+_sm_hygiene_bare_hits() {
+    local _sm_hbh_file _sm_hbh_tool _sm_hbh_scrubbed
+    _sm_hbh_file="$1"
+    _sm_hbh_tool="$2"
+
+    # Blanks out only the sm_resolve_bin call's OWN argument list (the
+    # tool name plus its absolute-path candidates, which legitimately
+    # contain the bare word) up to that call's closing paren, rather than
+    # excluding any LINE that merely mentions "sm_resolve_bin" anywhere
+    # on it. The old, line-wide exclusion missed a bare call sharing a
+    # physical line with an unrelated sm_resolve_bin reference; scrubbing
+    # just the call's own text closes that without hiding anything else
+    # on the same line.
+    #
+    # The argument class is restricted to what a real candidate list
+    # ever contains (the tool name plus absolute paths: letters, digits,
+    # `_`, `/`, `.`, `-`, and whitespace) rather than "everything but a
+    # closing paren". A real call never contains a `)` before its own
+    # terminator, so this restriction changes nothing for one; it exists
+    # for the adversarial case, a bare call nested inside what looks like
+    # a resolver argument list (for example a `$(...)` used as a
+    # candidate), which carries a `)` of its OWN ahead of the real
+    # terminator. `[^)]*` stopped at that inner `)`, scrubbing the nested
+    # bare call away before the command-position scan below ever saw it.
+    # Restricting the class means anything containing a `$`, `(`, or `"`
+    # simply fails to match at all, so the sed leaves that entire
+    # malformed span untouched for the real scan to inspect instead of
+    # silently deleting it.
+    _sm_hbh_scrubbed=$(sed -E 's/sm_resolve_bin[[:space:][:alnum:]_./-]*\)//g' "$_sm_hbh_file")
+
+    # Two distinct shapes count as an unresolved use of a tool, found
+    # independently rather than through a single line-based allow/deny
+    # list (which is what let a comment- or log-line exclusion hide an
+    # actual invocation on the same kind of line):
+    #
+    #   1. A bare invocation in COMMAND POSITION: the tool name directly
+    #      after a command separator (start of line, `;`, `&`, `|`, `(`,
+    #      `)` as a case-arm pattern's own close, `{` opening an inline
+    #      group, a backtick, `$(`, or the shell keywords
+    #      `then`/`do`/`else`/`elif`), optionally quoted. Prose that
+    #      merely mentions a tool's name mid-sentence ("...ignoring
+    #      chmod...", "...from uname -m...") is never preceded by any of
+    #      those, so it never matches this shape, with no need to
+    #      special-case which function's message the prose happens to
+    #      sit inside (the previous version's exclusion for lines
+    #      starting with sm_log_err/sm_log/printf was too broad for
+    #      exactly this reason: it also hid a real bare invocation
+    #      embedded inside such a line's own $(...).) An earlier version
+    #      of this class omitted the shell keywords and the case/brace
+    #      delimiters, so a bare call right after `then`, `do`, `{`, or a
+    #      case pattern's `)` all shared a line with none of the original
+    #      delimiters and went uncaught.
+    #   2. A bare ASSIGNMENT: VAR=tool with no resolution in between.
+    #      "_sm_rm=rm" is exactly as unresolved as calling `rm` directly
+    #      the moment "$_sm_rm" is later invoked; a plain character-class
+    #      match that excluded anything preceded by "=" (the previous
+    #      version's) whitelisted this shape by construction instead of
+    #      catching it.
+    printf '%s\n' "$_sm_hbh_scrubbed" | grep -n -E \
+        "(^|[;&|(){]|\\\$\\(|(^|[[:space:];&|])(then|do|else|elif)[[:space:]])[[:space:]]*[\"']?${_sm_hbh_tool}([^A-Za-z0-9_]|\$)|(^|[;&|(){]|(^|[[:space:];&|])(then|do|else|elif)[[:space:]])[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=${_sm_hbh_tool}([^A-Za-z0-9_]|\$)" \
+        | grep -v -E '^[0-9]+:[[:space:]]*#'
+}
+
 _sm_hygiene_files=$(find "$_sm_repo_dir/scripts" "$_sm_repo_dir/commands" -type f -name '*.sh' | sort)
 
 # The allowed tool list is derived FROM sm_resolve_bin's own call sites
@@ -2017,43 +2181,8 @@ _sm_allowed_tools=$(printf '%s\n' "$_sm_hygiene_files" | xargs grep -ohE 'sm_res
 _sm_bare_tool_hits=0
 for _sm_hygiene_file in $_sm_hygiene_files; do
     _sm_relfile=${_sm_hygiene_file#"$_sm_repo_dir"/}
-
-    # Blanks out only the sm_resolve_bin call's OWN argument list (the
-    # tool name plus its absolute-path candidates, which legitimately
-    # contain the bare word) up to that call's closing paren, rather than
-    # excluding any LINE that merely mentions "sm_resolve_bin" anywhere
-    # on it. The old, line-wide exclusion missed a bare call sharing a
-    # physical line with an unrelated sm_resolve_bin reference; scrubbing
-    # just the call's own text closes that without hiding anything else
-    # on the same line.
-    _sm_scrubbed=$(sed -E 's/sm_resolve_bin[^)]*\)//g' "$_sm_hygiene_file")
-
     for _sm_tool in $_sm_allowed_tools; do
-        # Two distinct shapes count as an unresolved use of a tool, found
-        # independently rather than through a single line-based
-        # allow/deny list (which is what let a comment- or log-line
-        # exclusion hide an actual invocation on the same kind of line):
-        #
-        #   1. A bare invocation in COMMAND POSITION: the tool name
-        #      directly after a command separator (start of line, `;`,
-        #      `&`, `|`, `(`, a backtick, or `$(`), optionally quoted.
-        #      Prose that merely mentions a tool's name mid-sentence
-        #      ("...ignoring chmod...", "...from uname -m...") is never
-        #      preceded by any of those, so it never matches this shape,
-        #      with no need to special-case which function's message the
-        #      prose happens to sit inside (the previous version's
-        #      exclusion for lines starting with sm_log_err/sm_log/printf
-        #      was too broad for exactly this reason: it also hid a real
-        #      bare invocation embedded inside such a line's own $(...).)
-        #   2. A bare ASSIGNMENT: VAR=tool with no resolution in between.
-        #      "_sm_rm=rm" is exactly as unresolved as calling `rm`
-        #      directly the moment "$_sm_rm" is later invoked; a plain
-        #      character-class match that excluded anything preceded by
-        #      "=" (the previous version's) whitelisted this shape by
-        #      construction instead of catching it.
-        _sm_hits=$(printf '%s\n' "$_sm_scrubbed" | grep -n -E \
-            "(^|[;&|(]|\\\$\\()[[:space:]]*[\"']?${_sm_tool}([^A-Za-z0-9_]|\$)|(^|[;&|(])[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=${_sm_tool}([^A-Za-z0-9_]|\$)" \
-            | grep -v -E '^[0-9]+:[[:space:]]*#')
+        _sm_hits=$(_sm_hygiene_bare_hits "$_sm_hygiene_file" "$_sm_tool")
         if [ -n "$_sm_hits" ]; then
             _sm_bare_tool_hits=$((_sm_bare_tool_hits + 1))
             fail "$_sm_relfile calls '$_sm_tool' through a resolved absolute path, never bare" "$_sm_hits"
@@ -2068,6 +2197,45 @@ if [ -n "$_sm_allowed_tools" ]; then
 else
     fail "the allowed tool list was derived from sm_resolve_bin's own call sites, not hand-duplicated" "derived list is empty; the discovery itself is broken"
 fi
+
+# --- self-test: the detection logic above, driven against synthetic
+# fixtures rather than this repository's own (currently clean) tree, so
+# a regression in the guard itself fails loudly instead of only ever
+# being as good as whatever this tree happens to contain right now. Each
+# fixture plants exactly one bare `chmod` invocation in a shape this
+# guard's command-position class must catch. ---
+_sm_hygiene_selftest_dir="$_sm_tmp/hygiene-selftest"
+mkdir -p "$_sm_hygiene_selftest_dir"
+
+_sm_hygiene_case() {
+    # $1 = description, $2 = fixture body, $3 = tool the fixture plants bare
+    _sm_hc_file="$_sm_hygiene_selftest_dir/case.sh"
+    printf '%s\n' "$2" > "$_sm_hc_file"
+    _sm_hc_hits=$(_sm_hygiene_bare_hits "$_sm_hc_file" "$3")
+    if [ -n "$_sm_hc_hits" ]; then
+        pass "hygiene guard catches a bare call $1"
+    else
+        fail "hygiene guard catches a bare call $1" "no hit for fixture:
+$2"
+    fi
+}
+
+_sm_hygiene_case "after 'then'" 'if [ -f x ]; then chmod x; fi' chmod
+_sm_hygiene_case "after 'do'" 'for f in x; do chmod "$f"; done' chmod
+_sm_hygiene_case "inside { ... }" '{ chmod x; }' chmod
+_sm_hygiene_case "after a case pattern" 'case "$x" in *) chmod x ;; esac' chmod
+
+# The sed scrub must not delete a bare call nested inside what looks like
+# a resolver argument list (a command substitution used as one of the
+# candidates), which carries a `)` of its own ahead of the call's real
+# terminator. The bare call planted here is `rm`, not `chmod`: it sits
+# inside the nested `$(...)`, so this checks specifically that the scrub
+# leaves it standing rather than deleting it along with the outer
+# sm_resolve_bin call it appears to belong to.
+_sm_hygiene_case "nested inside a resolver argument list" '_sm_x=$(sm_resolve_bin chmod "$(rm -f x)")' rm
+
+unset -f _sm_hygiene_case
+unset _sm_hc_file _sm_hc_hits
 
 # ---------------------------------------------------------------------------
 # The shipped commands/descriptions.json, not only synthetic fixtures

@@ -92,16 +92,33 @@ sm_scaffold_dir() {
 # container, a root-owned 0666 file hard-linked to config.json became
 # fpp:fpp 0600 after one scaffold pass, at exit 0. Instead, whatever
 # content should end up at $1 (existing content, read but never written
-# through; or the default, for a fresh file) is written to a private
-# temp path in a brand-new inode (the same `set -C`/O_EXCL technique
-# sm_write_stamp in activate.sh uses), chowned and chmoded THERE, and
-# only then given the name $1 via one atomic rename. Reading $1's
-# existing content by path is harmless even if it is a hard link
-# (reading never mutates); only a write through the shared name would
-# have been unsafe, and this never performs one.
+# through; or the default, for a fresh file) is written to a temp path
+# in a brand-new inode (the same `set -C`/O_EXCL technique sm_write_stamp
+# in activate.sh uses), chowned and chmoded THERE, and only then given
+# the name $1 via one atomic rename. Reading $1's existing content by
+# path is harmless even if it is a hard link (reading never mutates);
+# only a write through the shared name would have been unsafe, and this
+# never performs one.
+#
+# That temp path is NOT a private location the way sm_stage_binary's
+# workdir is (a root-owned `mktemp -d` under /tmp that "fpp" cannot write
+# into at all): it sits inside sm_credential_dir/sm_state_dir, which are
+# mode 0700 but owned by "fpp" (the user fppd and this plugin's own
+# binary run as), so "fpp" can unlink and replace the temp file between
+# its creation and the chown/chmod below regardless of the mode on its
+# parent directory. `chown -h`, together with the device/inode identity
+# check below, closes ownership mutation through this path: `-h` means
+# a symlink swap only ever chowns the symlink itself, and the identity
+# check catches a plain regular-file swap `-h` cannot see. Mode is
+# narrower: there is no lchmod(2) on Linux, so the identity check right
+# before the chmod call below still leaves the gap between that check
+# and the chmod syscall itself unprotected, the same residual
+# `sm_scaffold_dir` above already documents and accepts for its own
+# chmod. This does not make the temp path private; it closes the
+# ownership race and narrows, without eliminating, the mode one.
 sm_scaffold_file() {
     local _sm_path _sm_mode _sm_mode_bare _sm_default _sm_chown _sm_chmod
-    local _sm_rm _sm_cat _sm_tmp _sm_content
+    local _sm_rm _sm_cat _sm_tmp _sm_content _sm_tmp_id _sm_tmp_id_now
     _sm_path="$1"
     _sm_mode="$2"
     _sm_default="$3"
@@ -140,11 +157,38 @@ sm_scaffold_file() {
         return 1
     fi
 
-    "$_sm_chown" "${SM_INSTALL_OWNER:-fpp:fpp}" "$_sm_tmp" || {
+    # $_sm_tmp's directory is owned by "fpp" (mode 0700, but "fpp" is the
+    # owner, not merely a group member — see sm_ensure_config_scaffold's
+    # header), so "fpp" can unlink and replace any entry inside it at
+    # will, including this freshly created temp file, independent of
+    # what gets chowned or chmoded onto its name next. `-h` (lchown)
+    # already stops a SYMLINK swap from redirecting the chown past the
+    # temp path itself. The device/inode capture and re-check around it
+    # below catch the wider case `-h` cannot: a plain regular-file swap,
+    # where "fpp" unlinks the temp path and puts an ordinary file in its
+    # place between creation and the chmod that follows. Comparing
+    # identity right before the chmod turns that race into a refusal
+    # instead of a silent chmod of whatever "fpp" put there.
+    _sm_tmp_id=$(sm_dev_inode "$_sm_tmp") || {
+        sm_log_err "could not read the identity of staged $_sm_tmp before chown/chmod"
+        "$_sm_rm" -f "$_sm_tmp"
+        return 1
+    }
+    "$_sm_chown" -h "${SM_INSTALL_OWNER:-fpp:fpp}" "$_sm_tmp" || {
         sm_log_err "could not set ownership of staged $_sm_tmp to ${SM_INSTALL_OWNER:-fpp:fpp}"
         "$_sm_rm" -f "$_sm_tmp"
         return 1
     }
+    _sm_tmp_id_now=$(sm_dev_inode "$_sm_tmp") || {
+        sm_log_err "could not re-read the identity of staged $_sm_tmp before chmod"
+        "$_sm_rm" -f "$_sm_tmp"
+        return 1
+    }
+    if [ "$_sm_tmp_id_now" != "$_sm_tmp_id" ]; then
+        sm_log_err "refusing to chmod $_sm_tmp: its device/inode changed since it was created, so something else was unlinked and put in its place"
+        "$_sm_rm" -f "$_sm_tmp"
+        return 1
+    fi
     "$_sm_chmod" "$_sm_mode" "$_sm_tmp" || {
         sm_log_err "could not set permissions on staged $_sm_tmp"
         "$_sm_rm" -f "$_sm_tmp"

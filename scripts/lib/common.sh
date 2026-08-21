@@ -189,6 +189,28 @@ sm_current_mode() {
     printf '%s\n' "$_sm_result"
 }
 
+# Prints "device:inode" for path $1, trying GNU stat's format first and
+# falling back to BSD/macOS stat's, the same two-format pattern
+# sm_current_mode uses. Prints nothing and returns non-zero if the path
+# cannot be stat'd. Two reads of this a mutating call apart, compared for
+# equality, is how sm_scaffold_file confirms the object it is about to
+# chmod is still the exact inode it created rather than something
+# unlinked and replaced in the gap: a symlink swap changes this even
+# though `-L` already refused it, and, unlike a symlink check, a plain
+# regular-file swap (unlink, then a fresh file created at the same name)
+# changes it too, which no symlink check can see at all.
+sm_dev_inode() {
+    local _sm_stat _sm_path _sm_result
+    _sm_path="$1"
+    _sm_stat=$(sm_resolve_bin stat /usr/bin/stat /bin/stat) || return 1
+    _sm_result=$("$_sm_stat" -c '%d:%i' "$_sm_path" 2>/dev/null) || \
+        _sm_result=$("$_sm_stat" -f '%d:%i' "$_sm_path" 2>/dev/null)
+    if [ -z "$_sm_result" ]; then
+        return 1
+    fi
+    printf '%s\n' "$_sm_result"
+}
+
 # Confirms a chmod actually took effect, rather than trusting its exit
 # code alone. A vfat or exFAT mount (FPP explicitly supports the media
 # directory on a USB stick) reports chmod as successful while the

@@ -88,7 +88,7 @@ sm_lock_version() {
 sm_lock_sha256() {
     local _sm_lock_file _sm_filename _sm_grep _sm_sed _sm_tr _sm_marker
     local _sm_flat _sm_objects _sm_count _sm_object _sm_rest _sm_hash
-    local _sm_sha_matches _sm_sha_count
+    local _sm_sha_matches _sm_sha_count _sm_sha_before _sm_sha_opens _sm_sha_closes
     _sm_lock_file="$1"
     _sm_filename="$2"
     _sm_grep=$(sm_resolve_bin grep /usr/bin/grep /bin/grep) || return 1
@@ -179,7 +179,16 @@ sm_lock_sha256() {
     # not top-level" defect as the sha_count-gt-1 case above, just with
     # the top-level field additionally missing so nothing is left to
     # outnumber the nested one.
+    #
+    # Counting braces in the raw text is only correct once quoted string
+    # VALUES are removed from it first: a brace character inside a JSON
+    # string (an entry with, say, a "note" field whose value is literally
+    # "}") is not a structural brace, and counting it as one lets a
+    # crafted string value understate the open count and defeat this
+    # check. The string-strip below removes every "..." span, honouring a
+    # backslash-escaped quote inside one, before anything is counted.
     _sm_sha_before=$(printf '%s\n' "$_sm_rest" | "$_sm_sed" -E 's/"sha256"[[:space:]]*:[[:space:]]*"[^"]*".*/ /')
+    _sm_sha_before=$(printf '%s' "$_sm_sha_before" | "$_sm_sed" -E 's/"([^"\\]|\\.)*"//g')
     _sm_sha_opens=$(printf '%s' "$_sm_sha_before" | "$_sm_tr" -dc '{')
     _sm_sha_closes=$(printf '%s' "$_sm_sha_before" | "$_sm_tr" -dc '}')
     if [ "${#_sm_sha_opens}" -gt "${#_sm_sha_closes}" ]; then

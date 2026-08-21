@@ -499,8 +499,17 @@ any FPP host involved:
   under the state directory; a hard link occupying a scaffold file's own
   path is refused a chown/chmod run in place (which would have mutated
   whatever the hard link's other name pointed at) in favor of preparing
-  the file's content at a private temp path and activating it with one
-  atomic rename, the same discipline `sm_write_stamp` uses; and a
+  the file's content at a temp path in a fresh inode and activating it
+  with one atomic rename, the same discipline `sm_write_stamp` uses —
+  that temp path sits inside the same `fpp`-owned scaffold directory, not
+  a private location, so its chown and chmod are each preceded by a
+  device/inode identity check that refuses rather than silently mutating
+  whatever `fpp` may have unlinked and replaced it with in the gap. This
+  closes the ownership half of that race in this repository's own
+  testing; the mode half is narrower, since Linux has no `lchmod(2)` and
+  a shell-driven check immediately before an external `chmod` call can
+  still lose to a swap timed between the check and that call, the same
+  residual already accepted for `sm_scaffold_dir`'s own chmod above. A
   directory (or anything else that is not a regular file) sitting at a
   scaffold file's own path is refused rather than chowned, chmoded, and
   reported healthy.
@@ -589,31 +598,49 @@ project targets:
   restricts write access below whatever `git clone` already left (owner
   read/write on every file, since `fpp` is the owner, not merely a
   group member). Nothing in either tree narrows this afterward.
-- An upgrade's `git pull` (or fetch/reset/clean fallback) runs as root
-  and does not itself re-run that `chown`, so a file an upgrade rewrites
-  can land root-owned momentarily. That gap is closed automatically,
-  system-wide, not just for this plugin: `setFileOwnership()`
-  (`src/boot/FPPINIT_Config.cpp:560-562` on FPP 10, `src/boot/
-  FPPINIT.cpp:886-888` on FPP 9) runs `chown -R fpp:fpp` over the entire
-  FPP media tree, including every installed plugin's directory, on every
-  boot's `postNetwork` phase, unconditionally, before `preStart` scripts
-  run.
+- An upgrade's `git pull` (or, on FPP 10, its fetch/reset/clean fallback
+  in `scripts/upgrade_plugin`) runs as root and does not itself re-run
+  that `chown`, so a file an upgrade rewrites can land root-owned
+  momentarily. FPP 9 has no `scripts/upgrade_plugin` at all; its upgrade
+  path is `www/api/controllers/plugin.php:227-246`, which runs `git pull`
+  under `sudo` instead. Still root either way. That momentary gap is
+  closed automatically, system-wide, not just for this plugin:
+  `setFileOwnership()` (`src/boot/FPPINIT.h` on FPP 10, `src/boot/
+  FPPINIT.cpp:886-888` on FPP 9) runs `chown -R fpp:fpp` over a hardcoded
+  `/home/fpp/media`, including every installed plugin's directory, on
+  every boot's `postNetwork` phase, unconditionally, before `preStart`
+  scripts run. That re-assertion is narrower than a blanket "every boot"
+  claim, though: `scripts/common` honours `www/media_root.txt` for a
+  relocated media root, but this hardcoded boot-time chown does not, so a
+  host with a relocated media root does not get this plugin directory
+  re-covered every boot. The install-time chown in `scripts/install_plugin`
+  still applies regardless, so the directory is still writable by `fpp`
+  at rest either way; only the "self-heals every boot" part is narrower
+  than claimed for a relocated media root.
 - `preStart.sh` is what actually runs this plugin's install/repair path
   at every `fppd` start. It is invoked with no privilege change
-  (`runPreStartScripts()`, `scripts/functions:511-519` on FPP 10, doing a
-  plain `/bin/bash ${FILE}`) from `fppinit`'s `bootPre` boot action
-  (`src/boot/FPPINIT.cpp:442-447` on FPP 10), which `fppd.service` runs
-  via `ExecStartPre` with no `User=` directive — `fppinit`, and therefore
-  every `preStart.sh` it runs, executes as root. `fppd` itself also has
-  no `User=` directive and drops no privilege anywhere in its own
-  source, so the resident component this project's C++ side eventually
-  becomes also runs in-process with `fppd`, as root, not as `fpp`.
+  (`runPreStartScripts()`, `scripts/functions:512-520` on FPP 10 and
+  `scripts/functions:714-722` on FPP 9, doing a plain `/bin/bash ${FILE}`)
+  from `fppinit`'s `bootPre` boot action (`src/boot/FPPINIT.cpp:435-442`
+  on FPP 10, where the `runScripts("preStart", true)` call itself sits on
+  line 442), which `fppd.service` runs via `ExecStartPre` with no
+  `User=` directive — `fppinit`, and therefore every `preStart.sh` it
+  runs, executes as root. `fppd` itself also has no `User=` directive and
+  drops no privilege anywhere in its own source, so the resident
+  component this project's C++ side eventually becomes also runs
+  in-process with `fppd`, as root, not as `fpp`.
 
 Put together: `preStart.sh`, `fpp_install.sh`, `fpp_upgrade.sh`,
 `fpp_uninstall.sh`, and every file under `scripts/lib/`, are read and
-executed as root, out of a directory the `fpp` user (the same account
-this plugin's own binary and every command FPP fires against it run as)
-can write to at any time. Nothing internal to those scripts, no symlink
+executed as root, out of a directory the `fpp` user can write to at any
+time. `fpp` is not the account this plugin's own binary or the commands
+FPP fires against it run as: a fired plugin command reaches its script by
+`execve` with no privilege drop (`Plugins.cpp` around line 315), same as
+`fppd` itself (see above), so both run as root, same as the scripts. The
+`fpp`-level actor in this picture is the FPP web UI: `SD/FPP_Install.sh`
+around line 2084 sets `APACHE_RUN_USER` to the FPP user, so Apache, and
+the PHP it runs (including the upgrade path cited above), is what
+actually executes as `fpp`. Nothing internal to those scripts, no symlink
 refusal, no atomic rename, no lock-file check, can be a trust boundary
 against an attacker who can already write into that directory: that
 attacker does not need to race a TOCTOU window or defeat a hash check at
