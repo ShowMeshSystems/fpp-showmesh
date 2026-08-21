@@ -26,7 +26,17 @@ _sm_pass=0
 _sm_fail=0
 
 _sm_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fpp-showmesh-tests.XXXXXX")
+# Resolved to its physical path (no symlink components) rather than left
+# as mktemp -d returned it: on macOS, $TMPDIR itself sits under /var,
+# which is a stock OS symlink to /private/var, and sm_mkdir_p_refuse_
+# symlinks (added to close a real defect: a path COMPONENT planted as a
+# symlink under a scaffold directory) has no way to tell a pre-existing,
+# benign system symlink like that apart from an attacker-planted one at
+# test time. Every fixture built from $_sm_tmp below is therefore free of
+# symlinks the test environment itself introduced, so the checks that
+# follow only ever see symlinks this suite plants on purpose.
 trap 'rm -rf "$_sm_tmp"' EXIT
+_sm_tmp=$(cd "$_sm_tmp" && pwd -P)
 
 pass() {
     _sm_pass=$((_sm_pass + 1))
@@ -952,6 +962,99 @@ assert_eq "the activated binary is executable (mode 0755)" "755" "$(sm_current_m
 assert_eq "no staging file is left behind after a successful activation" "" "$( [ -e "$_sm_act_staging" ] && echo present )"
 assert_eq "no backup file is left behind after a successful fresh activation (there was no previous binary to preserve)" "" "$( [ -e "$_sm_act_target.previous" ] && echo present )"
 
+# ---------------------------------------------------------------------------
+# sm_stage_binary against a hostile plugin directory: the TOCTOU window a
+# chmod/chown run AFTER staging left open (an "fpp" race between the
+# rename onto the staging path and the chmod/chown that used to follow it
+# could redirect a root chmod/chown onto an arbitrary path), and a
+# directory planted at the staging path ahead of a fresh install.
+#
+# A live 300-iteration race against the OLD implementation is not run
+# here: it is exactly as flaky as a real race is, by nature, and the fix
+# below closes the window structurally rather than narrowing it, so a
+# structural proof is the right kind of evidence for it, not a
+# probabilistic one. This is a STRUCTURAL test, not a live race: it
+# proves chmod/chown never execute against the shared staging path at
+# all, in this implementation, for any input, rather than trying to catch
+# a race in the act.
+# ---------------------------------------------------------------------------
+
+_sm_toctou_dir="$_sm_tmp/stage-toctou"
+mkdir -p "$_sm_toctou_dir/fake-bin"
+_sm_toctou_log="$_sm_toctou_dir/calls.log"
+: > "$_sm_toctou_log"
+cat > "$_sm_toctou_dir/fake-bin/chmod" <<FAKE
+#!/bin/sh
+printf 'chmod %s\n' "\$*" >> "$_sm_toctou_log"
+exec chmod "\$@"
+FAKE
+cat > "$_sm_toctou_dir/fake-bin/chown" <<FAKE
+#!/bin/sh
+printf 'chown %s\n' "\$*" >> "$_sm_toctou_log"
+exec chown "\$@"
+FAKE
+chmod 0755 "$_sm_toctou_dir/fake-bin/chmod" "$_sm_toctou_dir/fake-bin/chown"
+
+# Only chmod/chown are shadowed; every other tool sm_stage_binary needs
+# still resolves for real, the same partial-shadow technique the ln-
+# fallback test below uses.
+sm_resolve_bin() {
+    case "$1" in
+        chmod) printf '%s\n' "$_sm_toctou_dir/fake-bin/chmod"; return 0 ;;
+        chown) printf '%s\n' "$_sm_toctou_dir/fake-bin/chown"; return 0 ;;
+    esac
+    _sm_toctou_name="$1"
+    shift
+    for _sm_candidate in "$@"; do
+        if [ -x "$_sm_candidate" ]; then
+            printf '%s\n' "$_sm_candidate"
+            return 0
+        fi
+    done
+    sm_log_err "required tool not found: $_sm_toctou_name (checked: $*)"
+    return 1
+}
+
+_sm_toctou_target="$_sm_actdir/toctou-plugin"
+_sm_toctou_staging="$_sm_toctou_target.staging"
+printf 'binary content for the toctou structural proof\n' > "$_sm_tmp/toctou-source"
+if sm_stage_binary "$_sm_tmp/toctou-source" "$_sm_toctou_staging"; then
+    pass "sm_stage_binary succeeds with chmod/chown wrapped for the TOCTOU structural proof"
+else
+    fail "sm_stage_binary succeeds with chmod/chown wrapped for the TOCTOU structural proof" "unexpected failure"
+fi
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/common.sh"
+
+if [ -s "$_sm_toctou_log" ]; then
+    pass "the chmod/chown wrappers were actually invoked (the proof below is not vacuous)"
+else
+    fail "the chmod/chown wrappers were actually invoked (the proof below is not vacuous)" "the log is empty; chmod/chown were never called at all"
+fi
+if grep -F "$_sm_toctou_staging" "$_sm_toctou_log" >/dev/null 2>&1; then
+    fail "chmod/chown never run against the shared staging path" "$(cat "$_sm_toctou_log")"
+else
+    pass "chmod/chown never run against the shared staging path (both ran only against the private source path before it was ever staged)"
+fi
+
+# A directory planted at the staging path (reachable on a fresh install,
+# where nothing has ever legitimately occupied that path before) must be
+# refused, not silently accepted with the new binary moved INSIDE it:
+# `mv -f` onto an existing directory does not fail, it relocates the
+# source inside that directory instead, which would leave a directory at
+# the binary's own path, reported as a successful install, that preStart
+# would then find "healthy" (its own [-x] check on a directory is false,
+# but nothing distinguishes a fresh empty directory left mid-mutation
+# from any other unexpected state without this refusal in place).
+_sm_dirstage_target="$_sm_actdir/dirstage-plugin"
+_sm_dirstage_staging="$_sm_dirstage_target.staging"
+mkdir -p "$_sm_dirstage_staging"
+printf 'binary content that must never land inside the planted directory\n' > "$_sm_tmp/dirstage-source"
+out=$(sm_stage_binary "$_sm_tmp/dirstage-source" "$_sm_dirstage_staging" 2>&1)
+status=$?
+assert_failure "sm_stage_binary refuses a directory planted at the staging path" "$status"
+assert_eq "nothing was moved inside the planted directory" "" "$(ls -A "$_sm_dirstage_staging" 2>/dev/null)"
+
 # Upgrade: a previous binary exists, the swap succeeds, and the new
 # content is what is live. The backup is deliberately still on disk right
 # after sm_activate_binary returns (see its header): the activation
@@ -1195,7 +1298,7 @@ assert_eq "no leftover .tmp file after a successful write" "" "$( [ -e "$_sm_ws_
 # by anything with write access to the plugin directory (the same
 # directory and writability as the stamp itself), must not have its
 # target truncated and rewritten.
-_sm_ws_dir3="$_sm_wsdir/symlinked-tmp"
+_sm_ws_dir3="$_sm_wsdir/diverted-tmp"
 mkdir -p "$_sm_ws_dir3"
 _sm_ws_outside3="$_sm_tmp/outside-target-for-symlink-tmp"
 printf 'root-owned content that must never be touched\n' > "$_sm_ws_outside3"
@@ -1209,7 +1312,7 @@ assert_eq "nothing is left at the stamp path itself" "" "$( [ -e "$_sm_ws_dir3/s
 
 # A symlinked DESTINATION must be refused too, for the same reason as the
 # temp path: writing through it would rewrite whatever it points at.
-_sm_ws_dir4="$_sm_wsdir/symlinked-dest"
+_sm_ws_dir4="$_sm_wsdir/diverted-dest"
 mkdir -p "$_sm_ws_dir4"
 _sm_ws_outside4="$_sm_tmp/outside-target-for-symlink-dest"
 printf 'root-owned content that must never be touched either\n' > "$_sm_ws_outside4"
@@ -1315,7 +1418,7 @@ mkdir -p "$_sm_scafdir"
 # --- a symlinked directory target must be refused, not followed. ---
 _sm_scaf_creddir_target="$_sm_scafdir/creddir-real-target"
 mkdir -p "$_sm_scaf_creddir_target"
-_sm_scaf_creddir_link="$_sm_scafdir/creddir-symlink"
+_sm_scaf_creddir_link="$_sm_scafdir/creddir-diverted"
 ln -s "$_sm_scaf_creddir_target" "$_sm_scaf_creddir_link"
 out=$(sm_scaffold_dir "$_sm_scaf_creddir_link" 0700 2>&1)
 status=$?
@@ -1333,7 +1436,7 @@ _sm_scaf_victim="$_sm_scafdir/victim-existing.txt"
 printf 'must never be touched\n' > "$_sm_scaf_victim"
 chmod 0644 "$_sm_scaf_victim"
 _sm_scaf_victim_mode_before=$(sm_current_mode "$_sm_scaf_victim")
-_sm_scaf_file_link="$_sm_scafdir/file-symlink-to-victim"
+_sm_scaf_file_link="$_sm_scafdir/file-diverted-to-victim"
 ln -s "$_sm_scaf_victim" "$_sm_scaf_file_link"
 out=$(sm_scaffold_file "$_sm_scaf_file_link" 0600 "{}" 2>&1)
 status=$?
@@ -1349,7 +1452,7 @@ assert_eq "the symlink target's mode is untouched" "$_sm_scaf_victim_mode_before
 # brand-new fpp:fpp 0600 file at the dangling symlink's target before
 # this fix. ---
 _sm_scaf_dangle_target="$_sm_scafdir/must-never-be-created.txt"
-_sm_scaf_dangle_link="$_sm_scafdir/dangling-symlink"
+_sm_scaf_dangle_link="$_sm_scafdir/dangling-diverted"
 ln -s "$_sm_scaf_dangle_target" "$_sm_scaf_dangle_link"
 out=$(sm_scaffold_file "$_sm_scaf_dangle_link" 0600 "{}" 2>&1)
 status=$?
@@ -1385,6 +1488,105 @@ else
     fail "sm_scaffold_file re-run on an existing file succeeds" "unexpected failure"
 fi
 assert_eq "a re-run does not overwrite existing file content" "operator-provisioned content that must survive a re-run" "$(cat "$_sm_scaf_ok_file")"
+
+# --- a symlinked PARENT path COMPONENT, not the leaf, must be refused
+# too. sm_refuse_symlink alone only ever checked the leaf; `mkdir -p`
+# follows a symlink at any parent component exactly as readily as it
+# creates a missing one. Verified for real against a Debian container: a
+# symlinked "plugindata" path component let a root scaffold create a
+# directory, and every file scaffolded inside it, under /etc, owned by
+# "fpp", at exit 0. ---
+_sm_scaf_comp_real="$_sm_scafdir/component-real-target"
+mkdir -p "$_sm_scaf_comp_real"
+_sm_scaf_comp_link="$_sm_scafdir/component-diverted"
+ln -s "$_sm_scaf_comp_real" "$_sm_scaf_comp_link"
+_sm_scaf_comp_deep="$_sm_scaf_comp_link/nested/deeper"
+out=$(sm_scaffold_dir "$_sm_scaf_comp_deep" 0700 2>&1)
+status=$?
+assert_failure "sm_scaffold_dir refuses a symlinked PARENT path component, not just the leaf" "$status"
+assert_contains "the refusal names the symlink" "$out" "symlink"
+assert_eq "nothing was created inside the symlinked component's real target" "" "$(ls -A "$_sm_scaf_comp_real" 2>/dev/null)"
+
+# --- sm_ensure_config_scaffold itself, not only its two split helpers:
+# this is the direct exercise of the function every install, upgrade, and
+# preStart repair actually calls. sm_credential_dir/sm_state_dir are
+# shadowed to point inside this suite's own tmp tree (their real targets
+# are fixed, non-overridable absolute paths this suite must never touch),
+# with a symlinked PARENT component planted ahead of the state directory
+# to exercise the exact gap defect #2 above closes, end to end through
+# the actual entrypoint rather than only through sm_scaffold_dir
+# directly. ---
+_sm_ecs_dir="$_sm_tmp/ensure-config-scaffold"
+mkdir -p "$_sm_ecs_dir"
+_sm_ecs_cred_target="$_sm_ecs_dir/credroot"
+mkdir -p "$_sm_ecs_cred_target"
+_sm_ecs_state_real="$_sm_ecs_dir/state-real-target"
+mkdir -p "$_sm_ecs_state_real"
+_sm_ecs_state_link="$_sm_ecs_dir/state-diverted"
+ln -s "$_sm_ecs_state_real" "$_sm_ecs_state_link"
+sm_credential_dir() { printf '%s\n' "$_sm_ecs_cred_target/creddir"; }
+sm_state_dir() { printf '%s\n' "$_sm_ecs_state_link/nested/statedir"; }
+out=$(sm_ensure_config_scaffold 2>&1)
+status=$?
+assert_failure "sm_ensure_config_scaffold itself refuses a symlinked path component under the state directory" "$status"
+assert_eq "nothing was created inside the symlinked component's real target" "" "$(ls -A "$_sm_ecs_state_real" 2>/dev/null)"
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/common.sh"
+
+# --- a HARD link at a scaffold file's own path passes sm_refuse_symlink
+# (it is an ordinary regular file, just with a second name), so a
+# chown/chmod run in place against it would mutate whatever the other
+# name points at. Verified for real against a Debian container: a root-
+# owned 0666 file hard-linked to config.json became fpp:fpp 0600 after
+# one scaffold pass, at exit 0. ---
+_sm_scaf_hl_victim="$_sm_scafdir/hardlink-victim"
+printf 'victim content sharing an inode with the scaffolded path, must survive\n' > "$_sm_scaf_hl_victim"
+chmod 0666 "$_sm_scaf_hl_victim"
+_sm_scaf_hl_victim_mode_before=$(sm_current_mode "$_sm_scaf_hl_victim")
+_sm_scaf_hl_path="$_sm_scafdir/hardlinked-config.json"
+ln "$_sm_scaf_hl_victim" "$_sm_scaf_hl_path"
+if sm_scaffold_file "$_sm_scaf_hl_path" 0600 "{}"; then
+    pass "sm_scaffold_file succeeds when a hard link occupies its own path"
+else
+    fail "sm_scaffold_file succeeds when a hard link occupies its own path" "unexpected failure"
+fi
+assert_eq "the hard-linked victim's content is untouched" "victim content sharing an inode with the scaffolded path, must survive" "$(cat "$_sm_scaf_hl_victim")"
+assert_eq "the hard-linked victim's mode is untouched" "$_sm_scaf_hl_victim_mode_before" "$(sm_current_mode "$_sm_scaf_hl_victim")"
+assert_eq "the scaffolded path itself now has the requested mode, in a fresh inode" "600" "$(sm_current_mode "$_sm_scaf_hl_path")"
+
+# --- a DIRECTORY (or anything else that is not a regular file) at a
+# scaffold file's own path must be refused, not chowned/chmoded and
+# reported healthy. ---
+_sm_scaf_dir_at_file_path="$_sm_scafdir/directory-at-file-path"
+mkdir -p "$_sm_scaf_dir_at_file_path"
+out=$(sm_scaffold_file "$_sm_scaf_dir_at_file_path" 0600 "{}" 2>&1)
+status=$?
+assert_failure "sm_scaffold_file refuses a directory at its own path" "$status"
+assert_eq "the directory is left exactly as it was, not chowned/chmoded" "" "$(ls -A "$_sm_scaf_dir_at_file_path" 2>/dev/null)"
+
+echo "== sm_create_new_file (noclobber) =="
+
+# The shell's own noclobber option (`set -C`) is what makes the existence
+# check and the file creation one kernel-level operation; nothing in this
+# suite exercised that specifically before. A pre-existing regular file
+# at the target must be refused outright, never truncated and rewritten,
+# which is exactly what a plain `>` redirect without noclobber would do.
+_sm_ncdir="$_sm_tmp/create-new-file"
+mkdir -p "$_sm_ncdir"
+_sm_nc_path="$_sm_ncdir/already-there"
+printf 'must survive untouched\n' > "$_sm_nc_path"
+out=$(sm_create_new_file "$_sm_nc_path" "new content that must never land here" 2>&1)
+status=$?
+assert_failure "sm_create_new_file refuses when a regular file already exists at the target" "$status"
+assert_eq "the pre-existing file's content is untouched, not truncated by noclobber's own open" "must survive untouched" "$(cat "$_sm_nc_path")"
+
+_sm_nc_fresh="$_sm_ncdir/fresh"
+if sm_create_new_file "$_sm_nc_fresh" "brand new content"; then
+    pass "sm_create_new_file succeeds for a path nothing occupies yet"
+else
+    fail "sm_create_new_file succeeds for a path nothing occupies yet" "unexpected failure"
+fi
+assert_eq "the newly created file holds the given content" "brand new content" "$(cat "$_sm_nc_fresh")"
 
 echo "== install/upgrade pipeline (sm_install_binary, sm_install_or_upgrade) =="
 
@@ -1793,53 +1995,78 @@ fi
 # suite stayed fully green because nothing checked for it: with an empty
 # PATH it silently failed and the caller misreported "no entry for the
 # artifact" instead of "tool not found". This grep-based check is what
-# makes that regress loudly instead of silently. The tool list below is
-# exactly the set this repository already resolves somewhere via
-# sm_resolve_bin; a newly introduced tool must be added to both the
-# resolution call sites and this list, or this check has nothing to
-# compare a bare invocation against.
+# makes that regress loudly instead of silently.
+#
+# The runtime script surface is DISCOVERED, not a hardcoded file list: a
+# hardcoded list left a newly added script unscanned by construction,
+# which is exactly the gap that let a bare tool call ship inside one
+# undetected before. Every *.sh under scripts/ and commands/ is this
+# repository's actual runtime surface (test/run_tests.sh itself is
+# excluded on purpose — it is a dev/CI-only script that legitimately
+# calls tools bare, with a real PATH, and is not one of the three
+# constrained invocation conventions common.sh's header describes).
+_sm_hygiene_files=$(find "$_sm_repo_dir/scripts" "$_sm_repo_dir/commands" -type f -name '*.sh' | sort)
+
+# The allowed tool list is derived FROM sm_resolve_bin's own call sites
+# across those same discovered scripts, not duplicated by hand: a tool
+# newly resolved somewhere becomes allowed here automatically, with
+# nothing to fall out of sync.
+_sm_allowed_tools=$(printf '%s\n' "$_sm_hygiene_files" | xargs grep -ohE 'sm_resolve_bin[[:space:]]+[A-Za-z0-9_]+' 2>/dev/null \
+    | awk '{print $2}' | sort -u)
+
 _sm_bare_tool_hits=0
-for _sm_hygiene_file in \
-    scripts/lib/common.sh \
-    scripts/lib/arch.sh \
-    scripts/lib/fetch.sh \
-    scripts/lib/verify.sh \
-    scripts/lib/commands.sh \
-    scripts/lib/lock.sh \
-    scripts/lib/activate.sh \
-    scripts/lib/install-core.sh \
-    scripts/fpp_install.sh \
-    scripts/fpp_upgrade.sh \
-    scripts/fpp_uninstall.sh \
-    scripts/preStart.sh \
-    commands/run-macro.sh
-do
-    for _sm_tool in tr sed grep awk dd od stat mkdir chmod chown rm cp mv \
-        tar mktemp cat uname ln sha256sum curl wget
-    do
-        # A hit is the tool name as its own word (not part of a longer
-        # identifier like "_sm_tr", a path component like "/bin/tr" used
-        # as a candidate literal, or an assignment target's value like
-        # "_sm_rm=rm"), outside a comment, outside a log or printf format
-        # string that merely mentions the tool's name in prose (the
-        # source of every false positive this check turned up while it
-        # was being written: "...ignoring chmod...", "...from uname
-        # -m...", "...linux_%s.tar.gz...", "...via curl..."), and outside
-        # the sm_resolve_bin call that names it as a candidate in the
-        # first place; anything else naming the bare word is an
-        # unresolved invocation.
-        _sm_hits=$(grep -n -E "(^|[^A-Za-z0-9_=])${_sm_tool}([^A-Za-z0-9_]|\$)" "$_sm_repo_dir/$_sm_hygiene_file" 2>/dev/null \
-            | grep -v 'sm_resolve_bin' \
-            | grep -v -E '^[0-9]+:[[:space:]]*#' \
-            | grep -v -E '^[0-9]+:[[:space:]]*(sm_log_err|sm_log|printf)[[:space:]]+["'"'"']')
+for _sm_hygiene_file in $_sm_hygiene_files; do
+    _sm_relfile=${_sm_hygiene_file#"$_sm_repo_dir"/}
+
+    # Blanks out only the sm_resolve_bin call's OWN argument list (the
+    # tool name plus its absolute-path candidates, which legitimately
+    # contain the bare word) up to that call's closing paren, rather than
+    # excluding any LINE that merely mentions "sm_resolve_bin" anywhere
+    # on it. The old, line-wide exclusion missed a bare call sharing a
+    # physical line with an unrelated sm_resolve_bin reference; scrubbing
+    # just the call's own text closes that without hiding anything else
+    # on the same line.
+    _sm_scrubbed=$(sed -E 's/sm_resolve_bin[^)]*\)//g' "$_sm_hygiene_file")
+
+    for _sm_tool in $_sm_allowed_tools; do
+        # Two distinct shapes count as an unresolved use of a tool, found
+        # independently rather than through a single line-based
+        # allow/deny list (which is what let a comment- or log-line
+        # exclusion hide an actual invocation on the same kind of line):
+        #
+        #   1. A bare invocation in COMMAND POSITION: the tool name
+        #      directly after a command separator (start of line, `;`,
+        #      `&`, `|`, `(`, a backtick, or `$(`), optionally quoted.
+        #      Prose that merely mentions a tool's name mid-sentence
+        #      ("...ignoring chmod...", "...from uname -m...") is never
+        #      preceded by any of those, so it never matches this shape,
+        #      with no need to special-case which function's message the
+        #      prose happens to sit inside (the previous version's
+        #      exclusion for lines starting with sm_log_err/sm_log/printf
+        #      was too broad for exactly this reason: it also hid a real
+        #      bare invocation embedded inside such a line's own $(...).)
+        #   2. A bare ASSIGNMENT: VAR=tool with no resolution in between.
+        #      "_sm_rm=rm" is exactly as unresolved as calling `rm`
+        #      directly the moment "$_sm_rm" is later invoked; a plain
+        #      character-class match that excluded anything preceded by
+        #      "=" (the previous version's) whitelisted this shape by
+        #      construction instead of catching it.
+        _sm_hits=$(printf '%s\n' "$_sm_scrubbed" | grep -n -E \
+            "(^|[;&|(]|\\\$\\()[[:space:]]*[\"']?${_sm_tool}([^A-Za-z0-9_]|\$)|(^|[;&|(])[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=${_sm_tool}([^A-Za-z0-9_]|\$)" \
+            | grep -v -E '^[0-9]+:[[:space:]]*#')
         if [ -n "$_sm_hits" ]; then
             _sm_bare_tool_hits=$((_sm_bare_tool_hits + 1))
-            fail "$_sm_hygiene_file calls '$_sm_tool' through a resolved absolute path, never bare" "$_sm_hits"
+            fail "$_sm_relfile calls '$_sm_tool' through a resolved absolute path, never bare" "$_sm_hits"
         fi
     done
 done
 if [ "$_sm_bare_tool_hits" -eq 0 ]; then
     pass "no runtime script calls a resolved external tool bare (unresolved by absolute path)"
+fi
+if [ -n "$_sm_allowed_tools" ]; then
+    pass "the allowed tool list was derived from sm_resolve_bin's own call sites, not hand-duplicated"
+else
+    fail "the allowed tool list was derived from sm_resolve_bin's own call sites, not hand-duplicated" "derived list is empty; the discovery itself is broken"
 fi
 
 # ---------------------------------------------------------------------------

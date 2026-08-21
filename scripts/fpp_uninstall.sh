@@ -20,9 +20,13 @@ _sm_script_dir=$(cd "$(dirname "$0")" && pwd)
 
 _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || {
     # Even tool resolution failing must not block removal from being
-    # attempted; fall through and let the shell's builtin behavior of a
-    # missing command surface below rather than aborting outright.
-    _sm_rm=rm
+    # attempted; fall through to the same absolute-path candidate
+    # sm_resolve_bin itself checks first, rather than a bare "rm" that
+    # depends on a PATH none of this repository's invocation conventions
+    # guarantee (see common.sh's header). If /bin/rm genuinely is not
+    # there either, the invocation below fails loudly with a normal
+    # "command not found" instead of silently no-oping.
+    _sm_rm=/bin/rm
 }
 
 _sm_creddir=$(sm_credential_dir)

@@ -53,6 +53,23 @@ sm_atomic_rename() {
 # failure, the staging file is removed and nothing has changed on disk
 # outside the temporary extraction area the caller already owns.
 #
+# The chmod and chown both run on $1 BEFORE it is ever given the name
+# $2, not after: $1 sits in the caller's own private mktemp'd workdir
+# (root-owned, mode 0700, created fresh per install by sm_install_binary
+# in install-core.sh), which "fpp" cannot write into, while $2 sits in
+# the plugin directory, a tree "fpp" (the user fppd and this plugin's own
+# binary both run as) CAN write into. An earlier version of this function
+# renamed onto $2 FIRST and only then ran chmod/chown against that public
+# path, which left a real window: "fpp", racing to replace the file at
+# $2 with a symlink between the rename and the chmod, could redirect a
+# root-run chmod/chown onto an arbitrary path. Doing the mutating,
+# path-based operations at the private path instead, and only handing the
+# result a name inside the shared directory via a single atomic rename
+# once it is already fully prepared, closes that window structurally: no
+# chmod or chown ever executes against a path "fpp" can race on. This is
+# the same temp-then-rename discipline sm_write_stamp below uses for
+# stamp writes, applied here to the binary itself.
+#
 # The chown target is overridable via SM_INSTALL_OWNER (same pattern as
 # SM_AARCH64_LINKER_CANDIDATES in arch.sh) so this repository's own tests
 # can exercise a real, successful chown without an "fpp" system user
@@ -64,32 +81,59 @@ sm_stage_binary() {
     _sm_staging="$2"
     _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
 
-    if ! sm_atomic_rename "$_sm_source" "$_sm_staging"; then
-        sm_log_err "could not stage new binary at $_sm_staging"
+    if [ -L "$_sm_source" ] || [ ! -f "$_sm_source" ]; then
+        sm_log_err "refusing to stage $_sm_source: not a regular file"
+        "$_sm_rm" -f "$_sm_source" 2>/dev/null
         return 1
     fi
 
     _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || {
-        "$_sm_rm" -f "$_sm_staging"
+        "$_sm_rm" -f "$_sm_source"
         return 1
     }
-    if ! "$_sm_chmod" 0755 "$_sm_staging"; then
-        sm_log_err "could not set permissions on staged binary $_sm_staging"
-        "$_sm_rm" -f "$_sm_staging"
+    if ! "$_sm_chmod" 0755 "$_sm_source"; then
+        sm_log_err "could not set permissions on extracted binary $_sm_source before staging it"
+        "$_sm_rm" -f "$_sm_source"
         return 1
     fi
-    if ! sm_verify_mode "$_sm_staging" 755; then
-        sm_log_err "staged binary $_sm_staging failed mode verification; discarding it before activation"
-        "$_sm_rm" -f "$_sm_staging"
+    if ! sm_verify_mode "$_sm_source" 755; then
+        sm_log_err "extracted binary $_sm_source failed mode verification before staging; discarding it"
+        "$_sm_rm" -f "$_sm_source"
         return 1
     fi
 
     _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || {
-        "$_sm_rm" -f "$_sm_staging"
+        "$_sm_rm" -f "$_sm_source"
         return 1
     }
-    if ! "$_sm_chown" "${SM_INSTALL_OWNER:-fpp:fpp}" "$_sm_staging"; then
-        sm_log_err "could not set ownership of staged binary $_sm_staging to fpp:fpp"
+    if ! "$_sm_chown" "${SM_INSTALL_OWNER:-fpp:fpp}" "$_sm_source"; then
+        sm_log_err "could not set ownership of extracted binary $_sm_source to fpp:fpp before staging it"
+        "$_sm_rm" -f "$_sm_source"
+        return 1
+    fi
+
+    # Only now does the fully prepared binary get a name inside the
+    # shared plugin directory, and only via a single atomic rename. A
+    # DIRECTORY planted at $_sm_staging ahead of this (e.g. by a hostile
+    # "fpp" process on a fresh install, where nothing legitimate has ever
+    # occupied that path before) is refused rather than risked: `mv -f`
+    # onto an existing directory does not fail, it moves the source
+    # INSIDE that directory instead, silently leaving nothing at
+    # $_sm_staging itself while reporting success — the same footgun
+    # sm_write_stamp's header documents for stamp writes.
+    if [ -d "$_sm_staging" ]; then
+        sm_log_err "cannot stage new binary at $_sm_staging: a directory already exists at that path"
+        "$_sm_rm" -f "$_sm_source"
+        return 1
+    fi
+    "$_sm_rm" -f "$_sm_staging"
+    if ! sm_atomic_rename "$_sm_source" "$_sm_staging"; then
+        sm_log_err "could not stage new binary at $_sm_staging"
+        "$_sm_rm" -f "$_sm_source"
+        return 1
+    fi
+    if [ -L "$_sm_staging" ] || [ ! -f "$_sm_staging" ]; then
+        sm_log_err "staged binary at $_sm_staging is not a regular file after activation; refusing to proceed"
         "$_sm_rm" -f "$_sm_staging"
         return 1
     fi

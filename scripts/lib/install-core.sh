@@ -50,20 +50,22 @@
 # on the developer machine running them; production code never sets it
 # and gets the real fpp:fpp target.
 sm_scaffold_dir() {
-    local _sm_path _sm_mode _sm_mode_bare _sm_mkdir _sm_chown _sm_chmod
+    local _sm_path _sm_mode _sm_mode_bare _sm_chown _sm_chmod
     _sm_path="$1"
     _sm_mode="$2"
     _sm_mode_bare="${_sm_mode#0}"
 
-    _sm_mkdir=$(sm_resolve_bin mkdir /bin/mkdir /usr/bin/mkdir) || return 1
     _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || return 1
     _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
 
     sm_refuse_symlink "$_sm_path" || return 1
-    "$_sm_mkdir" -p "$_sm_path" || {
-        sm_log_err "could not create directory: $_sm_path"
-        return 1
-    }
+    # sm_mkdir_p_refuse_symlinks (lib/common.sh) walks and creates every
+    # path COMPONENT, refusing a symlink at any of them; plain
+    # `mkdir -p` follows a symlink at any parent component exactly as
+    # readily as it creates a missing one, and only the leaf was ever
+    # checked here before. See its own comment for the real-host evidence
+    # this closes.
+    sm_mkdir_p_refuse_symlinks "$_sm_path" || return 1
     sm_refuse_symlink "$_sm_path" || return 1
     "$_sm_chown" -h "${SM_INSTALL_OWNER:-fpp:fpp}" "$_sm_path" || {
         sm_log_err "could not set ownership of $_sm_path to ${SM_INSTALL_OWNER:-fpp:fpp}"
@@ -78,40 +80,96 @@ sm_scaffold_dir() {
 }
 
 # Creates file $1 (mode $2) with default content $3 if missing, and
-# chowns/chmods it to fpp:fpp, using the same refuse-rather-than-follow
-# discipline as sm_scaffold_dir above, plus one more step that directory
-# does not need: the file's own creation. `sm_create_new_file` uses the
-# shell's noclobber option so the existence check and the write happen as
-# one kernel-level operation, closing the specific hole a `[ ! -e ]` test
-# followed by a redirect left open: a dangling symlink reads as "does
-# not exist" under `-e` (it dereferences), so that older sequence let a
-# root-run redirect create a brand-new, root-written file at whatever
-# path the dangling symlink named.
+# chowns/chmods it to fpp:fpp, without overwriting any content already
+# there.
+#
+# The chown/chmod never run against $1 directly. sm_refuse_symlink only
+# catches a SYMLINK at $1; it is blind to a HARD link (a second name for
+# an already-existing inode, `ln` with no `-s`), which passes every
+# symlink check because it genuinely is not one. A root chown/chmod run
+# on a path that is really a hard link to a victim file mutates that
+# victim's shared inode too, silently: verified against a real Debian
+# container, a root-owned 0666 file hard-linked to config.json became
+# fpp:fpp 0600 after one scaffold pass, at exit 0. Instead, whatever
+# content should end up at $1 (existing content, read but never written
+# through; or the default, for a fresh file) is written to a private
+# temp path in a brand-new inode (the same `set -C`/O_EXCL technique
+# sm_write_stamp in activate.sh uses), chowned and chmoded THERE, and
+# only then given the name $1 via one atomic rename. Reading $1's
+# existing content by path is harmless even if it is a hard link
+# (reading never mutates); only a write through the shared name would
+# have been unsafe, and this never performs one.
 sm_scaffold_file() {
     local _sm_path _sm_mode _sm_mode_bare _sm_default _sm_chown _sm_chmod
+    local _sm_rm _sm_cat _sm_tmp _sm_content
     _sm_path="$1"
     _sm_mode="$2"
     _sm_default="$3"
     _sm_mode_bare="${_sm_mode#0}"
+    _sm_tmp="$_sm_path.scaffold-tmp"
 
     _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || return 1
     _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
+    _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
+    _sm_cat=$(sm_resolve_bin cat /bin/cat /usr/bin/cat) || return 1
 
     sm_refuse_symlink "$_sm_path" || return 1
-    if [ ! -e "$_sm_path" ]; then
-        sm_create_new_file "$_sm_path" "$_sm_default" || return 1
+
+    if [ -e "$_sm_path" ]; then
+        if [ ! -f "$_sm_path" ]; then
+            sm_log_err "refusing to scaffold $_sm_path: something that is not a regular file exists at that path"
+            return 1
+        fi
+        _sm_content=$("$_sm_cat" "$_sm_path" 2>/dev/null) || {
+            sm_log_err "could not read existing content of $_sm_path"
+            return 1
+        }
+    else
+        _sm_content="$_sm_default"
     fi
-    sm_refuse_symlink "$_sm_path" || return 1
-    "$_sm_chown" -h "${SM_INSTALL_OWNER:-fpp:fpp}" "$_sm_path" || {
-        sm_log_err "could not set ownership of $_sm_path to ${SM_INSTALL_OWNER:-fpp:fpp}"
+
+    sm_refuse_symlink "$_sm_tmp" || return 1
+    if [ -d "$_sm_tmp" ]; then
+        sm_log_err "cannot scaffold $_sm_path: a directory already exists at temp path $_sm_tmp"
+        return 1
+    fi
+    "$_sm_rm" -f "$_sm_tmp"
+    if ! ( set -C; printf '%s\n' "$_sm_content" > "$_sm_tmp" ) 2>/dev/null; then
+        sm_log_err "could not stage $_sm_path via temp path $_sm_tmp"
+        "$_sm_rm" -f "$_sm_tmp"
+        return 1
+    fi
+
+    "$_sm_chown" "${SM_INSTALL_OWNER:-fpp:fpp}" "$_sm_tmp" || {
+        sm_log_err "could not set ownership of staged $_sm_tmp to ${SM_INSTALL_OWNER:-fpp:fpp}"
+        "$_sm_rm" -f "$_sm_tmp"
         return 1
     }
-    sm_refuse_symlink "$_sm_path" || return 1
-    "$_sm_chmod" "$_sm_mode" "$_sm_path" || {
-        sm_log_err "could not set permissions on $_sm_path"
+    "$_sm_chmod" "$_sm_mode" "$_sm_tmp" || {
+        sm_log_err "could not set permissions on staged $_sm_tmp"
+        "$_sm_rm" -f "$_sm_tmp"
         return 1
     }
-    sm_verify_mode "$_sm_path" "$_sm_mode_bare"
+    if ! sm_verify_mode "$_sm_tmp" "$_sm_mode_bare"; then
+        "$_sm_rm" -f "$_sm_tmp"
+        return 1
+    fi
+
+    sm_refuse_symlink "$_sm_path" || {
+        "$_sm_rm" -f "$_sm_tmp"
+        return 1
+    }
+    if [ -d "$_sm_path" ]; then
+        sm_log_err "cannot activate scaffolded file $_sm_path: a directory now exists at that path"
+        "$_sm_rm" -f "$_sm_tmp"
+        return 1
+    fi
+    if ! sm_atomic_rename "$_sm_tmp" "$_sm_path"; then
+        sm_log_err "could not activate scaffolded file $_sm_path"
+        "$_sm_rm" -f "$_sm_tmp"
+        return 1
+    fi
+    return 0
 }
 
 # Creates the plugin's credential directory/file and non-secret state

@@ -250,3 +250,67 @@ sm_create_new_file() {
     fi
     return 0
 }
+
+# Creates every missing component of absolute path $1 as a directory,
+# refusing (rather than following, the way `mkdir -p` does) a symlink at
+# ANY component, not only the leaf. sm_refuse_symlink alone is not
+# enough for a scaffold directory: `mkdir -p` walks and creates every
+# parent component itself, and it follows a symlink sitting at any of
+# those intermediate components exactly as readily as it would create a
+# missing one. A symlinked PARENT of, say, the plugin's state directory
+# (planted by "fpp", which can write everywhere a scaffold directory's
+# own ancestors live, since none of them are refused today) let a root
+# scaffold create a directory, and every file scaffolded inside it,
+# somewhere entirely different from where the plugin intended: verified
+# against a real Debian container, a symlinked "plugindata" path
+# component redirected a scaffold into creating a directory and four
+# files under /etc, owned by "fpp", at exit 0.
+#
+# Each component is checked and created one at a time, walking from the
+# root, so a symlink anywhere in the path is caught before anything
+# past it is ever touched.
+sm_mkdir_p_refuse_symlinks() {
+    local _sm_target _sm_mkdir _sm_prefix _sm_rest _sm_component
+    _sm_target="$1"
+    _sm_mkdir=$(sm_resolve_bin mkdir /bin/mkdir /usr/bin/mkdir) || return 1
+
+    case "$_sm_target" in
+        /*) : ;;
+        *)
+            sm_log_err "refusing to scaffold relative path $_sm_target: only absolute paths are supported"
+            return 1
+            ;;
+    esac
+
+    _sm_prefix=""
+    _sm_rest="${_sm_target#/}"
+    while [ -n "$_sm_rest" ]; do
+        _sm_component="${_sm_rest%%/*}"
+        case "$_sm_rest" in
+            */*) _sm_rest="${_sm_rest#*/}" ;;
+            *) _sm_rest="" ;;
+        esac
+        _sm_prefix="$_sm_prefix/$_sm_component"
+
+        if [ -L "$_sm_prefix" ]; then
+            sm_log_err "refusing to scaffold $_sm_target: path component $_sm_prefix is a symlink"
+            return 1
+        fi
+        if [ -d "$_sm_prefix" ]; then
+            continue
+        fi
+        if [ -e "$_sm_prefix" ]; then
+            sm_log_err "refusing to scaffold $_sm_target: path component $_sm_prefix exists and is not a directory"
+            return 1
+        fi
+        if ! "$_sm_mkdir" "$_sm_prefix" 2>/dev/null && [ ! -d "$_sm_prefix" ]; then
+            sm_log_err "could not create directory component $_sm_prefix while scaffolding $_sm_target"
+            return 1
+        fi
+        if [ -L "$_sm_prefix" ]; then
+            sm_log_err "refusing to scaffold $_sm_target: path component $_sm_prefix is a symlink immediately after creation"
+            return 1
+        fi
+    done
+    return 0
+}

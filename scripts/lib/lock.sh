@@ -167,6 +167,26 @@ sm_lock_sha256() {
         return 1
     fi
 
+    # Exactly one "sha256" occurrence within this entry, but that alone
+    # does not prove it is the entry's OWN field: an entry shaped like
+    # { "filename": "X", "meta": { "sha256": "…" } }, with no top-level
+    # "sha256" at all, has exactly one match too, and this used to return
+    # that nested value at exit 0 as if it were the entry's own hash. The
+    # match's brace depth relative to the entry object (counted in the
+    # text before it) tells the two cases apart: a real top-level field
+    # sits at depth 0, one nested inside "meta" (or any other object-
+    # valued key) sits at depth 1 or deeper. This is the same "nested,
+    # not top-level" defect as the sha_count-gt-1 case above, just with
+    # the top-level field additionally missing so nothing is left to
+    # outnumber the nested one.
+    _sm_sha_before=$(printf '%s\n' "$_sm_rest" | "$_sm_sed" -E 's/"sha256"[[:space:]]*:[[:space:]]*"[^"]*".*/ /')
+    _sm_sha_opens=$(printf '%s' "$_sm_sha_before" | "$_sm_tr" -dc '{')
+    _sm_sha_closes=$(printf '%s' "$_sm_sha_before" | "$_sm_tr" -dc '}')
+    if [ "${#_sm_sha_opens}" -gt "${#_sm_sha_closes}" ]; then
+        sm_log_err "artifacts.lock.json entry for $_sm_filename has its only \"sha256\" field nested inside another key, not at the entry's own level; refusing rather than treating it as the entry's hash"
+        return 1
+    fi
+
     _sm_hash=$(printf '%s\n' "$_sm_sha_matches" | "$_sm_sed" -E 's/.*:[[:space:]]*"([^"]*)"/\1/')
 
     # A "sha256" field that matched (so it DID come after "filename", and

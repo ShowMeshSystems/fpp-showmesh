@@ -481,6 +481,29 @@ any FPP host involved:
   cleared so the write can proceed instead of failing forever; and a
   write that genuinely cannot create its temp file leaving an existing
   stamp untouched rather than truncated.
+- `sm_stage_binary`'s chmod/chown never run against the shared staging
+  path at all: both execute against the private extraction workdir
+  BEFORE the binary is ever given a name inside the plugin directory,
+  proven structurally by wrapping the resolved `chmod`/`chown` and
+  asserting neither is ever invoked with the staging path as an
+  argument, closing the window where a root chmod/chown run AFTER
+  staging could be redirected onto an arbitrary path by a symlink raced
+  into place between the rename and the chmod. A directory planted at
+  the staging path ahead of a fresh install is refused rather than
+  silently accepted with the new binary moved inside it.
+- Scaffold symlink hardening, beyond the leaf-path refusal already
+  covered above: a symlinked PARENT path component (not just the final
+  component) under a scaffold directory is refused rather than followed,
+  exercised both directly against `sm_scaffold_dir` and end to end
+  through `sm_ensure_config_scaffold` itself with a symlinked component
+  under the state directory; a hard link occupying a scaffold file's own
+  path is refused a chown/chmod run in place (which would have mutated
+  whatever the hard link's other name pointed at) in favor of preparing
+  the file's content at a private temp path and activating it with one
+  atomic rename, the same discipline `sm_write_stamp` uses; and a
+  directory (or anything else that is not a regular file) sitting at a
+  scaffold file's own path is refused rather than chowned, chmoded, and
+  reported healthy.
 - `sm_install_binary` and `sm_install_or_upgrade`, end to end, with
   `sm_detect_arch` and `sm_download` shadowed so nothing here touches the
   network: a clean fresh install; a lock hash that disagrees with the
@@ -490,13 +513,19 @@ any FPP host involved:
   both an upgrade and a fresh install) rolling the live binary back, or
   removing an unverified fresh install with nothing to roll back to,
   before the transaction commits. Once the transaction has committed, a
-  failed architecture-stamp or version-stamp write is reported as a
-  failure but no longer rolls the binary back: the newly activated binary
-  already passed mode re-verification and stays live, since rolling it
-  back at that point would restore an older binary while leaving a stamp
-  already rewritten to describe the one just discarded. Every stamp
-  (architecture, version) is confirmed written after a successful
-  install. `sm_install_or_upgrade`'s own orchestration (command-script
+  failed architecture-stamp write is reported as a failure but no longer
+  rolls the binary back: the newly activated binary already passed mode
+  re-verification and stays live, since rolling it back at that point
+  would restore an older binary while leaving a stamp already rewritten
+  to describe the one just discarded. There is no installed-version
+  stamp; an earlier version of this code wrote one alongside the
+  architecture stamp, but nothing ever read it back, so it was removed
+  rather than given a reader it does not need. The architecture stamp is
+  confirmed written after a successful install, and a failed write on a
+  fresh path (nothing recorded there before) is self-correcting rather
+  than permanently invisible to the repair guard that reads it back; see
+  `sm_write_stamp_or_sentinel`'s comment in `scripts/lib/activate.sh`.
+  `sm_install_or_upgrade`'s own orchestration (command-script
   validation gating the config scaffold, the config scaffold gating the
   binary install) is exercised with `sm_ensure_config_scaffold` shadowed,
   so this suite never touches `/etc` or the real plugin state directory
@@ -537,6 +566,104 @@ None of this raises the plugin-distribution research record's evidence
 level. It stays at what a bench container and a source read can support;
 only running this against a real FPP instance moves the on-host tier
 above.
+
+## Trust boundary: what the lock and activation controls actually defend
+
+This repository's own controls, the symlink refusals, the atomic stage-
+then-swap binary activation, and `artifacts.lock.json` verified before
+anything downloaded is ever extracted or executed, all run as ROOT out of
+the plugin's own installed directory. That directory is not a neutral
+place for them to live. This section states plainly what those controls
+can and cannot defend against, given where they run.
+
+**The plugin directory is writable by the unprivileged `fpp` user, at
+rest, under normal FPP operation — this is an FPP platform property, not
+a misconfiguration and not something this repository can fix from
+inside itself.** Confirmed by reading FPP's own Plugin Manager and boot
+source directly, against both the pinned FPP 9.x and FPP 10.x trees this
+project targets:
+
+- A fresh plugin install ends with `$SUDO chown -R fpp:fpp <plugin dir>`
+  (`scripts/install_plugin`, FPP 9 line 36-38 and FPP 10 line 127-129),
+  run as root via `$SUDO`, with no accompanying `chmod` that ever
+  restricts write access below whatever `git clone` already left (owner
+  read/write on every file, since `fpp` is the owner, not merely a
+  group member). Nothing in either tree narrows this afterward.
+- An upgrade's `git pull` (or fetch/reset/clean fallback) runs as root
+  and does not itself re-run that `chown`, so a file an upgrade rewrites
+  can land root-owned momentarily. That gap is closed automatically,
+  system-wide, not just for this plugin: `setFileOwnership()`
+  (`src/boot/FPPINIT_Config.cpp:560-562` on FPP 10, `src/boot/
+  FPPINIT.cpp:886-888` on FPP 9) runs `chown -R fpp:fpp` over the entire
+  FPP media tree, including every installed plugin's directory, on every
+  boot's `postNetwork` phase, unconditionally, before `preStart` scripts
+  run.
+- `preStart.sh` is what actually runs this plugin's install/repair path
+  at every `fppd` start. It is invoked with no privilege change
+  (`runPreStartScripts()`, `scripts/functions:511-519` on FPP 10, doing a
+  plain `/bin/bash ${FILE}`) from `fppinit`'s `bootPre` boot action
+  (`src/boot/FPPINIT.cpp:442-447` on FPP 10), which `fppd.service` runs
+  via `ExecStartPre` with no `User=` directive — `fppinit`, and therefore
+  every `preStart.sh` it runs, executes as root. `fppd` itself also has
+  no `User=` directive and drops no privilege anywhere in its own
+  source, so the resident component this project's C++ side eventually
+  becomes also runs in-process with `fppd`, as root, not as `fpp`.
+
+Put together: `preStart.sh`, `fpp_install.sh`, `fpp_upgrade.sh`,
+`fpp_uninstall.sh`, and every file under `scripts/lib/`, are read and
+executed as root, out of a directory the `fpp` user (the same account
+this plugin's own binary and every command FPP fires against it run as)
+can write to at any time. Nothing internal to those scripts, no symlink
+refusal, no atomic rename, no lock-file check, can be a trust boundary
+against an attacker who can already write into that directory: that
+attacker does not need to race a TOCTOU window or defeat a hash check at
+all, they can simply edit `preStart.sh` (or any `scripts/lib/*.sh` file
+it sources) directly, and it runs as root, unmodified logic included, the
+next time `fppd` starts. This holds under standard FPP operation on both
+pinned trees; the one documented exception is macOS, where `install_plugin`
+skips the `chown -R fpp:fpp` step entirely (`scripts/install_plugin`,
+guarded by `if [ "${FPPPLATFORM}" != "MacOS" ]`) — not a real FPP host,
+so not a mitigating case for a production install. Whether the FPP web
+UI's own PHP process (which triggers install/upgrade over `$SUDO`) has a
+passwordless sudo grant is asserted by `www/config.php` but the sudoers
+file itself does not ship in either pinned tree, so that specific link
+in the chain is provisioned by the base OS image, outside what either
+tree's source confirms.
+
+**What this means for the claims this repository can honestly make.**
+Nothing in this repository can be a defense against an attacker who
+already has `fpp`-level code execution on the host: FPP's own plugin
+model hands that attacker root on the next `fppd` start regardless of
+anything this repository does to its own scripts. That is not a gap this
+project introduced and not one it can close from inside a plugin
+directory FPP itself makes writable; closing it would mean changing how
+FPP's Plugin Manager owns and mounts plugin trees, which is out of scope
+for this repository (see "What this repository is NOT" above).
+
+What this repository's controls DO deliver, and the one claim actually
+confirmed with no bypass found by a prior adversarial review, is
+narrower and real: **the network path.** A release artifact fetched from
+`SHOWMESH_PLUGIN_ARTIFACT_BASE_URL` is verified against this
+repository's own committed `artifacts.lock.json`, which arrives on the
+host as part of the plugin's own checked-out tree (installed/upgraded by
+FPP's `git clone`/`git pull`, not fetched over the same channel as the
+binary), before that artifact is ever extracted or executed. That
+ordering, verify before extract-or-execute, holds regardless of what a
+compromised or malicious release host serves: a tampered tarball is
+rejected on the lock's authority before `tar` ever runs against it, and
+before the stage-then-swap activation in `scripts/lib/activate.sh` ever
+gives it a name next to the live binary. This is the actual, delivered
+guarantee this repository can stand behind: a release host that goes
+bad, or a network path that gets tampered with, cannot get an unverified
+binary run. It says nothing about, and cannot defend against, an
+attacker who already reached the plugin directory some other way (over
+`fpp`-level access to the host itself, not over the network path this
+lock protects) — the symlink refusals and atomic activation this
+project has hardened make the difference between that attacker's write
+being caught immediately versus silently succeeding at whatever a
+specific mutation was aimed at, but neither outcome changes the deeper
+fact that the scripts themselves are not a trusted input once `fpp` can
+already write to their own directory.
 
 ## Two things this repository does not solve
 
