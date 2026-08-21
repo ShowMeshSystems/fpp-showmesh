@@ -617,6 +617,71 @@ status=$?
 assert_success "the second, correctly-ordered object on the same line still resolves" "$status"
 assert_eq "the second object's own hash is returned" "$_sm_hash_reordered_b" "$out"
 
+# A "sha256" NESTED inside some other key of the same entry (a "meta"
+# object, say) must not be mistaken for the entry's own top-level hash:
+# the pattern that finds "sha256" fields has no concept of JSON nesting,
+# so it used to find both, silently take the FIRST one (the nested
+# value), and return it at exit 0.
+_sm_hash_nested_outer=$(python3 -c "print('a' * 64)")
+_sm_hash_nested_inner=$(python3 -c "print('c' * 64)")
+mkdir -p "$_sm_lockdir-nested-sha256"
+cat > "$_sm_lockdir-nested-sha256/artifacts.lock.json" <<JSON
+{
+  "version": "1.2.3",
+  "artifacts": [
+    { "filename": "nested.tar.gz", "meta": { "sha256": "$_sm_hash_nested_inner" }, "sha256": "$_sm_hash_nested_outer" }
+  ]
+}
+JSON
+out=$(sm_lock_sha256 "$_sm_lockdir-nested-sha256/artifacts.lock.json" "nested.tar.gz" 2>&1)
+status=$?
+assert_failure "an entry with a sha256 nested inside another key is refused, not resolved to the nested value" "$status"
+if [ "$out" = "$_sm_hash_nested_inner" ]; then
+    fail "the nested sha256 is never silently returned" "returned $out, which is the NESTED value, not a refusal"
+else
+    pass "the nested sha256 is never silently returned"
+fi
+
+# The duplicate-filename guard above counts LINES with grep -Fc, which
+# undercounts two occurrences that share ONE physical, minified line as a
+# single match. A single OBJECT with a duplicated "filename" key (and a
+# duplicated "sha256" key to go with it) on one line exercises exactly
+# that undercount, distinct from the two-separate-objects duplicate case
+# above: this used to pass the ambiguity guard and return the FIRST
+# sha256, where JSON semantics give the last.
+_sm_hash_dupkey_a=$(python3 -c "print('1' * 64)")
+_sm_hash_dupkey_b=$(python3 -c "print('2' * 64)")
+mkdir -p "$_sm_lockdir-dup-keys-one-object"
+printf '{"version": "1.2.3", "artifacts": [{ "filename": "dupkey.tar.gz", "filename": "dupkey.tar.gz", "sha256": "%s", "sha256": "%s" }]}\n' \
+    "$_sm_hash_dupkey_a" "$_sm_hash_dupkey_b" > "$_sm_lockdir-dup-keys-one-object/artifacts.lock.json"
+out=$(sm_lock_sha256 "$_sm_lockdir-dup-keys-one-object/artifacts.lock.json" "dupkey.tar.gz" 2>"$_sm_tmp/lock-dupkey.err")
+status=$?
+assert_failure "a single object with a duplicated filename key, minified onto one line, is refused as ambiguous" "$status"
+assert_contains "the refusal counts 2 entries, not the 1 a line-based count would see" "$(cat "$_sm_tmp/lock-dupkey.err")" "2 entries naming dupkey.tar.gz"
+
+# An empty "sha256" value is a field that IS present and IS in the right
+# place (after "filename"), just empty: a different case from the field
+# being absent or misordered, which the old check for -z "$_sm_hash"
+# could not tell apart from this one. It must still fail closed, but with
+# its own, accurate message.
+mkdir -p "$_sm_lockdir-empty-sha256"
+cat > "$_sm_lockdir-empty-sha256/artifacts.lock.json" <<'JSON'
+{
+  "version": "1.2.3",
+  "artifacts": [
+    { "filename": "blank.tar.gz", "sha256": "" }
+  ]
+}
+JSON
+out=$(sm_lock_sha256 "$_sm_lockdir-empty-sha256/artifacts.lock.json" "blank.tar.gz" 2>&1)
+status=$?
+assert_failure "an empty sha256 value is refused" "$status"
+# The filename deliberately avoids the substring "empty" so this
+# assertion cannot pass by coincidentally matching the filename embedded
+# in a DIFFERENT, wrong message (the old "does not come after filename"
+# text) instead of actually proving the new, accurate message fired.
+assert_contains "the refusal names the value as empty, not a fabricated key-ordering problem" "$out" "empty sha256 value"
+
 # The compromised-host case this whole mechanism exists for: a downloaded
 # tarball and a downloaded SHA256SUMS agree with each other (as if the
 # manifest were generated from these same, tampered bytes), but disagree
@@ -651,6 +716,26 @@ if sm_verify_sha256 "$_sm_compdir/$_sm_comp_tarball" "$_sm_comp_expected"; then
 else
     pass "the compromised host's self-consistent pair is rejected by the lock-anchored check"
 fi
+
+# lock.sh's own header says every tool it uses is resolved to an absolute
+# path precisely because none of this repository's invocation conventions
+# can be trusted to carry a PATH: a bare `tr` regressed into
+# sm_lock_sha256's own flattening step despite that. Run in a subshell so
+# clearing PATH here cannot affect anything after this block, including
+# the "$( )" command substitutions this suite itself relies on throughout.
+# sm_resolve_bin's candidates are absolute paths checked with `[ -x ]`, so
+# a correctly resolved tool must keep working with no PATH at all; a bare
+# invocation instead fails, and the bug this closes was not that failure
+# itself but sm_lock_sha256 misreporting it as "no entry for the
+# artifact" rather than a tool being missing.
+out=$(
+    # shellcheck disable=SC2123
+    PATH=""
+    sm_lock_sha256 "$_sm_lockdir/artifacts.lock.json" "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz" 2>&1
+)
+status=$?
+assert_success "sm_lock_sha256 succeeds with an empty PATH (every tool it uses is resolved to an absolute path)" "$status"
+assert_eq "the lookup still returns the correct hash with an empty PATH" "$_sm_hash_amd64" "$out"
 
 # ---------------------------------------------------------------------------
 # Command script validation
@@ -1148,6 +1233,26 @@ else
 fi
 assert_eq "the stamp written after clearing a leftover temp directory holds the given content" "amd64" "$(cat "$_sm_ws_path5")"
 
+# A HARD link at the temp path passes both the symlink check and the
+# directory check above (it is an ordinary regular file, just with a
+# second name), so it is a distinct case from either: the old in-place
+# `printf > tmp` truncated and rewrote whatever the hard link's OTHER
+# name pointed at, before the rename ever ran. Verified: hard-linking a
+# victim file to the temp path and writing a stamp replaced the victim's
+# content, at exit 0.
+_sm_ws_dir7="$_sm_wsdir/hardlinked-tmp"
+mkdir -p "$_sm_ws_dir7"
+_sm_ws_victim7="$_sm_ws_dir7/victim-hardlinked"
+printf 'victim content sharing an inode with the temp path, must survive\n' > "$_sm_ws_victim7"
+ln "$_sm_ws_victim7" "$_sm_ws_dir7/stamp.tmp"
+if sm_write_stamp "$_sm_ws_dir7/stamp" "amd64"; then
+    pass "sm_write_stamp succeeds when a hard link occupies the temp path"
+else
+    fail "sm_write_stamp succeeds when a hard link occupies the temp path" "unexpected failure"
+fi
+assert_eq "the hard-linked victim's content is untouched by the write" "victim content sharing an inode with the temp path, must survive" "$(cat "$_sm_ws_victim7")"
+assert_eq "the stamp itself still holds the given content, written to a fresh inode" "amd64" "$(cat "$_sm_ws_dir7/stamp")"
+
 # A write that genuinely cannot create its temp file (permission denied,
 # not a symlink or a directory) must never truncate an EXISTING stamp:
 # the whole point of writing to a temp file and renaming is that a
@@ -1185,6 +1290,101 @@ fi
 
 # shellcheck disable=SC1090
 . "$_sm_lib_dir/install-core.sh"
+
+# ---------------------------------------------------------------------------
+# sm_ensure_config_scaffold: refuses a symlink on every scaffold path
+# instead of following it. The credential directory, the state directory,
+# and every file inside them are chowned and chmoded as root on every
+# install, upgrade, and preStart repair, and all of them live inside a
+# tree the "fpp" system user (the user fppd and this plugin's own binary
+# run as) can also write to. Before this fix, "fpp" planting a symlink at
+# any of these paths turned the next repair into a root-run chown/chmod
+# (or root-written file creation) at whatever the symlink pointed to; see
+# sm_ensure_config_scaffold's header for the real-host evidence this
+# closes. SM_INSTALL_OWNER is already set to the current user for the
+# rest of this suite (see the stage-then-swap section above), so the
+# success paths below exercise a real chown without requiring an "fpp"
+# system user on the developer machine running them.
+# ---------------------------------------------------------------------------
+
+echo "== sm_ensure_config_scaffold (symlink refusal) =="
+
+_sm_scafdir="$_sm_tmp/scaffold"
+mkdir -p "$_sm_scafdir"
+
+# --- a symlinked directory target must be refused, not followed. ---
+_sm_scaf_creddir_target="$_sm_scafdir/creddir-real-target"
+mkdir -p "$_sm_scaf_creddir_target"
+_sm_scaf_creddir_link="$_sm_scafdir/creddir-symlink"
+ln -s "$_sm_scaf_creddir_target" "$_sm_scaf_creddir_link"
+out=$(sm_scaffold_dir "$_sm_scaf_creddir_link" 0700 2>&1)
+status=$?
+assert_failure "sm_scaffold_dir refuses a symlinked directory path" "$status"
+assert_contains "the refusal names the symlink" "$out" "symlink"
+assert_eq "the symlink itself is untouched (still a symlink, not replaced)" "symlink" "$( [ -L "$_sm_scaf_creddir_link" ] && echo symlink )"
+
+# --- a symlinked FILE destination, pointing at a real, pre-existing file
+# outside the scaffold tree, must be refused: the chown/chmod that would
+# otherwise follow it is exactly how "fpp" turns a planted symlink into
+# root handing ownership of an arbitrary file to "fpp". Verified for real
+# against a Debian container as root: a root:root 0644 file outside this
+# tree ended up fpp:fpp 0600 after one repair pass before this fix. ---
+_sm_scaf_victim="$_sm_scafdir/victim-existing.txt"
+printf 'must never be touched\n' > "$_sm_scaf_victim"
+chmod 0644 "$_sm_scaf_victim"
+_sm_scaf_victim_mode_before=$(sm_current_mode "$_sm_scaf_victim")
+_sm_scaf_file_link="$_sm_scafdir/file-symlink-to-victim"
+ln -s "$_sm_scaf_victim" "$_sm_scaf_file_link"
+out=$(sm_scaffold_file "$_sm_scaf_file_link" 0600 "{}" 2>&1)
+status=$?
+assert_failure "sm_scaffold_file refuses a symlinked destination pointing at an existing file" "$status"
+assert_contains "the refusal names the symlink" "$out" "symlink"
+assert_eq "the symlink target's content is untouched" "must never be touched" "$(cat "$_sm_scaf_victim")"
+assert_eq "the symlink target's mode is untouched" "$_sm_scaf_victim_mode_before" "$(sm_current_mode "$_sm_scaf_victim")"
+
+# --- a DANGLING symlink at a file path is the case `[ ! -e ]` alone
+# cannot see (it dereferences and reports false), which used to let the
+# creation redirect land at the symlink's target instead of refusing.
+# Verified for real against a Debian container as root: this created a
+# brand-new fpp:fpp 0600 file at the dangling symlink's target before
+# this fix. ---
+_sm_scaf_dangle_target="$_sm_scafdir/must-never-be-created.txt"
+_sm_scaf_dangle_link="$_sm_scafdir/dangling-symlink"
+ln -s "$_sm_scaf_dangle_target" "$_sm_scaf_dangle_link"
+out=$(sm_scaffold_file "$_sm_scaf_dangle_link" 0600 "{}" 2>&1)
+status=$?
+assert_failure "sm_scaffold_file refuses a dangling symlinked destination" "$status"
+assert_contains "the refusal names the symlink" "$out" "symlink"
+assert_eq "nothing is created at the dangling symlink's target" "" "$( [ -e "$_sm_scaf_dangle_target" ] && echo present )"
+
+# --- the ordinary case: no symlink anywhere, a fresh scaffold directory
+# and file are created, owned, and moded correctly, and a second run is
+# idempotent and does not disturb existing content. ---
+_sm_scaf_ok_dir="$_sm_scafdir/ok-dir"
+if sm_scaffold_dir "$_sm_scaf_ok_dir" 0700; then
+    pass "sm_scaffold_dir succeeds for a fresh, non-symlinked directory"
+else
+    fail "sm_scaffold_dir succeeds for a fresh, non-symlinked directory" "unexpected failure"
+fi
+assert_eq "the fresh directory has the requested mode" "700" "$(sm_current_mode "$_sm_scaf_ok_dir")"
+
+_sm_scaf_ok_file="$_sm_scaf_ok_dir/config.json"
+if sm_scaffold_file "$_sm_scaf_ok_file" 0600 "{}"; then
+    pass "sm_scaffold_file succeeds for a fresh, non-symlinked file"
+else
+    fail "sm_scaffold_file succeeds for a fresh, non-symlinked file" "unexpected failure"
+fi
+assert_eq "the fresh file holds the given default content" "{}" "$(cat "$_sm_scaf_ok_file")"
+assert_eq "the fresh file has the requested mode" "600" "$(sm_current_mode "$_sm_scaf_ok_file")"
+
+printf 'operator-provisioned content that must survive a re-run\n' > "$_sm_scaf_ok_file"
+chmod 0600 "$_sm_scaf_ok_file"
+if sm_scaffold_file "$_sm_scaf_ok_file" 0600 "{}"; then
+    pass "sm_scaffold_file re-run on an existing file succeeds"
+else
+    fail "sm_scaffold_file re-run on an existing file succeeds" "unexpected failure"
+fi
+assert_eq "a re-run does not overwrite existing file content" "operator-provisioned content that must survive a re-run" "$(cat "$_sm_scaf_ok_file")"
 
 echo "== install/upgrade pipeline (sm_install_binary, sm_install_or_upgrade) =="
 
@@ -1265,7 +1465,7 @@ fi
 assert_eq "the installed binary's content matches the served tarball" "fresh install binary content" "$(cat "$_sm_ip_fresh/showmesh-fpp-plugin")"
 assert_eq "the installed binary is executable (0755)" "755" "$(sm_current_mode "$_sm_ip_fresh/showmesh-fpp-plugin")"
 assert_eq "the arch stamp is written" "amd64" "$(cat "$_sm_ip_fresh/.installed-arch")"
-assert_eq "the installed-version stamp is written" "$_sm_ip_version" "$(cat "$_sm_ip_fresh/.installed-version")"
+assert_eq "no installed-version stamp is written (removed: nothing in this repository ever reads it back)" "" "$( [ -e "$_sm_ip_fresh/.installed-version" ] && echo present )"
 assert_eq "no staging file is left behind after a successful sm_install_binary run" "" "$( [ -e "$_sm_ip_fresh/showmesh-fpp-plugin.staging" ] && echo present )"
 assert_eq "no backup file is left behind after a successful fresh sm_install_binary run" "" "$( [ -e "$_sm_ip_fresh/showmesh-fpp-plugin.previous" ] && echo present )"
 
@@ -1432,23 +1632,46 @@ assert_contains "the failure names the architecture stamp" "$out" "architecture 
 assert_eq "the NEW binary stays live despite the failed stamp write, since activation had already committed" "new binary that activates and stays live despite a failed stamp write" "$(cat "$_sm_ip_stampfail/showmesh-fpp-plugin")"
 assert_eq "no backup file remains: the transaction had already committed before the stamp write was attempted" "" "$( [ -e "$_sm_ip_stampfail/showmesh-fpp-plugin.previous" ] && echo present )"
 
-# --- scenario 6: a failed installed-version stamp write behaves the same
-# way, and the arch stamp written just before it (also after commit)
-# still lands correctly. ---
-_sm_ip_verstampfail="$_sm_ipdir/version-stamp-write-failure"
-mkdir -p "$_sm_ip_verstampfail"
-make_tarball "$_sm_tmp/verstampfail-new.tar.gz" "new binary that activates despite a failed version-stamp write"
-_sm_ip_verstampfail_hash=$(sha256sum "$_sm_tmp/verstampfail-new.tar.gz" | awk '{print $1}')
-make_install_lock "$_sm_ip_verstampfail/artifacts.lock.json" "$_sm_ip_version" "$_sm_ip_tarball_name" "$_sm_ip_verstampfail_hash"
-sm_download() { sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/verstampfail-new.tar.gz" "$_sm_ip_tarball_name"; }
-mkdir -p "$_sm_ip_verstampfail/.installed-version"
+# --- scenario 6: a stamp write that fails with NOTHING already at the
+# stamp path (a genuine write failure, e.g. a full disk; shadowed here
+# rather than manufactured, since the directory-exists trick scenario 5
+# uses deliberately leaves something at the path and so cannot exercise
+# this case) must not leave the architecture guard permanently blind. A
+# missing stamp reads as "installed by a version of this repository
+# before the stamp existed" (see sm_arch_repair_reason), which is the
+# WRONG reading for a stamp write that failed on this run: verified,
+# before this fix, with no stamp on disk and detection disagreeing with
+# the binary, sm_arch_repair_reason returned no reason and preStart would
+# have exited 0. sm_write_stamp_or_sentinel closes this by leaving an
+# EMPTY stamp behind on a failed write when nothing was there before,
+# which sm_arch_repair_reason already treats as needing repair. ---
+_sm_ip_sentinel="$_sm_ipdir/stamp-write-failure-no-prior-stamp"
+mkdir -p "$_sm_ip_sentinel"
+make_tarball "$_sm_tmp/sentinel-new.tar.gz" "new binary that activates despite a failed arch-stamp write with nothing there before"
+_sm_ip_sentinel_hash=$(sha256sum "$_sm_tmp/sentinel-new.tar.gz" | awk '{print $1}')
+make_install_lock "$_sm_ip_sentinel/artifacts.lock.json" "$_sm_ip_version" "$_sm_ip_tarball_name" "$_sm_ip_sentinel_hash"
+sm_download() { sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/sentinel-new.tar.gz" "$_sm_ip_tarball_name"; }
+sm_write_stamp() { sm_log_err "test-injected stamp write failure"; return 1; }
 
-out=$(sm_install_binary "$_sm_ip_verstampfail" "$_sm_ip_fppdir_unused" "$_sm_ip_version" 2>&1)
+out=$(sm_install_binary "$_sm_ip_sentinel" "$_sm_ip_fppdir_unused" "$_sm_ip_version" 2>&1)
 status=$?
-assert_failure "a failed installed-version stamp write after the transaction commits is still reported as a failure" "$status"
-assert_contains "the failure names the installed-version stamp" "$out" "installed-version stamp"
-assert_eq "the arch stamp still lands even though the version stamp failed" "amd64" "$(cat "$_sm_ip_verstampfail/.installed-arch")"
-assert_eq "the NEW binary stays live despite the failed version-stamp write" "new binary that activates despite a failed version-stamp write" "$(cat "$_sm_ip_verstampfail/showmesh-fpp-plugin")"
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/activate.sh"
+assert_failure "a stamp write failing with nothing at the path beforehand is still reported as a failure" "$status"
+assert_eq "the NEW binary stays live despite the failed stamp write" "new binary that activates despite a failed arch-stamp write with nothing there before" "$(cat "$_sm_ip_sentinel/showmesh-fpp-plugin")"
+if [ -f "$_sm_ip_sentinel/.installed-arch" ] && [ -z "$(cat "$_sm_ip_sentinel/.installed-arch")" ]; then
+    pass "an empty sentinel stamp is left behind after a failed write with nothing there before"
+else
+    fail "an empty sentinel stamp is left behind after a failed write with nothing there before" "got: $( [ -e "$_sm_ip_sentinel/.installed-arch" ] && cat "$_sm_ip_sentinel/.installed-arch" || echo '(no file at all)')"
+fi
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/arch.sh"
+out=$(sm_arch_repair_reason "$_sm_ip_sentinel" "$_sm_ip_fppdir_unused")
+if [ -n "$out" ]; then
+    pass "sm_arch_repair_reason treats the sentinel left by a failed first stamp write as needing repair"
+else
+    fail "sm_arch_repair_reason treats the sentinel left by a failed first stamp write as needing repair" "expected non-empty repair reason, got none"
+fi
 
 unset -f sm_detect_arch sm_download
 
@@ -1560,6 +1783,63 @@ else
 
     _sm_recorded_mode=$(cd "$_sm_repo_dir" && "$_sm_git" ls-files -s -- artifacts.lock.json 2>/dev/null | awk '{print $1}')
     assert_eq "artifacts.lock.json is committed non-executable (100644, it is data, not a script)" "100644" "$_sm_recorded_mode"
+fi
+
+# Every external tool this repository's runtime code shells out to must be
+# resolved to an absolute path first (see common.sh's header: none of the
+# three invocation conventions FPP uses to run these scripts can be
+# trusted to carry a PATH). A bare `tr` slipped back in at lock.sh's own
+# flattening step after a previous round of this exact cleanup, and the
+# suite stayed fully green because nothing checked for it: with an empty
+# PATH it silently failed and the caller misreported "no entry for the
+# artifact" instead of "tool not found". This grep-based check is what
+# makes that regress loudly instead of silently. The tool list below is
+# exactly the set this repository already resolves somewhere via
+# sm_resolve_bin; a newly introduced tool must be added to both the
+# resolution call sites and this list, or this check has nothing to
+# compare a bare invocation against.
+_sm_bare_tool_hits=0
+for _sm_hygiene_file in \
+    scripts/lib/common.sh \
+    scripts/lib/arch.sh \
+    scripts/lib/fetch.sh \
+    scripts/lib/verify.sh \
+    scripts/lib/commands.sh \
+    scripts/lib/lock.sh \
+    scripts/lib/activate.sh \
+    scripts/lib/install-core.sh \
+    scripts/fpp_install.sh \
+    scripts/fpp_upgrade.sh \
+    scripts/fpp_uninstall.sh \
+    scripts/preStart.sh \
+    commands/run-macro.sh
+do
+    for _sm_tool in tr sed grep awk dd od stat mkdir chmod chown rm cp mv \
+        tar mktemp cat uname ln sha256sum curl wget
+    do
+        # A hit is the tool name as its own word (not part of a longer
+        # identifier like "_sm_tr", a path component like "/bin/tr" used
+        # as a candidate literal, or an assignment target's value like
+        # "_sm_rm=rm"), outside a comment, outside a log or printf format
+        # string that merely mentions the tool's name in prose (the
+        # source of every false positive this check turned up while it
+        # was being written: "...ignoring chmod...", "...from uname
+        # -m...", "...linux_%s.tar.gz...", "...via curl..."), and outside
+        # the sm_resolve_bin call that names it as a candidate in the
+        # first place; anything else naming the bare word is an
+        # unresolved invocation.
+        _sm_hits=$(grep -n -E "(^|[^A-Za-z0-9_=])${_sm_tool}([^A-Za-z0-9_]|\$)" "$_sm_repo_dir/$_sm_hygiene_file" 2>/dev/null \
+            | grep -v 'sm_resolve_bin' \
+            | grep -v -E '^[0-9]+:[[:space:]]*#' \
+            | grep -v -E '^[0-9]+:[[:space:]]*(sm_log_err|sm_log|printf)[[:space:]]+["'"'"']')
+        if [ -n "$_sm_hits" ]; then
+            _sm_bare_tool_hits=$((_sm_bare_tool_hits + 1))
+            fail "$_sm_hygiene_file calls '$_sm_tool' through a resolved absolute path, never bare" "$_sm_hits"
+        fi
+    done
+done
+if [ "$_sm_bare_tool_hits" -eq 0 ]; then
+    pass "no runtime script calls a resolved external tool bare (unresolved by absolute path)"
 fi
 
 # ---------------------------------------------------------------------------

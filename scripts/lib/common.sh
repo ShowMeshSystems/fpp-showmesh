@@ -163,10 +163,6 @@ sm_arch_stamp_path() {
     printf '%s\n' "$1/.installed-arch"
 }
 
-sm_version_stamp_path() {
-    printf '%s\n' "$1/.installed-version"
-}
-
 # Reads a stamp file's contents with trailing whitespace stripped by
 # command substitution, absolute-path tool resolution included so this
 # stays consistent with every other read in this repository. Prints
@@ -211,6 +207,45 @@ sm_verify_mode() {
     }
     if [ "$_sm_actual" != "$_sm_expected" ]; then
         sm_log_err "mode verification failed for $_sm_path: requested $_sm_expected, filesystem reports $_sm_actual (a vfat/exFAT mount silently ignoring chmod, because it derives modes from mount options, produces exactly this mismatch)"
+        return 1
+    fi
+    return 0
+}
+
+# Refuses (rather than follows) a symlink already present at $1. Every
+# scaffold and stamp path this project chowns, chmods, or creates through
+# lives inside a directory the "fpp" system user can also write to (the
+# same user fppd and this plugin's own binary run as), so a symlink
+# planted there before this check runs must stop a root-run install or
+# repair cold instead of being dereferenced. `-L` uses lstat, so it
+# catches a symlink whether it points at a real file or nowhere at all
+# (a dangling symlink), which `-e` alone would miss.
+sm_refuse_symlink() {
+    if [ -L "$1" ]; then
+        sm_log_err "refusing to operate on $1: a symlink exists at that path"
+        return 1
+    fi
+    return 0
+}
+
+# Creates a NEW plain file at $1 with content $2, refusing outright if
+# anything already occupies that path, symlink or otherwise. Uses the
+# shell's own noclobber option (`set -C`) rather than a separate `[ ! -e ]`
+# test followed by a redirect: noclobber's existence check and the file
+# creation are one kernel-level operation (open with O_EXCL), so there is
+# no gap between "nothing is there" and "the file is written" for a
+# symlink, dangling or not, to be planted into. A plain `[ ! -e ]` test
+# would also be fooled by a dangling symlink specifically, since `-e`
+# dereferences and reports false for one, which is exactly what let a
+# redirect create a file at a dangling symlink's target in the defect
+# this replaced.
+sm_create_new_file() {
+    if ! ( set -C; printf '%s\n' "$2" > "$1" ) 2>/dev/null; then
+        if [ -e "$1" ] || [ -L "$1" ]; then
+            sm_log_err "refusing to create $1: something already exists at that path (a symlink planted between the last check and this write, or a genuine race with another process)"
+        else
+            sm_log_err "could not create $1"
+        fi
         return 1
     fi
     return 0

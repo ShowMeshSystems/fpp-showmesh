@@ -26,69 +26,138 @@
 # install failure, instead of the credential file being readable by
 # everything on the host and the binary refusing to start at showtime
 # because it requires exactly 0600.
-sm_ensure_config_scaffold() {
-    local _sm_mkdir _sm_chown _sm_chmod
-    local _sm_creddir _sm_credfile _sm_statedir
-    local _sm_name_default _sm_fname _sm_default _sm_fpath
+# Creates directory $1 (mode $2, e.g. "0700") if missing and chowns/chmods
+# it to fpp:fpp, refusing outright rather than following if a symlink is
+# ever found at $1. Every scaffold directory lives inside a tree the
+# "fpp" system user (the user fppd and this plugin's own binary run as)
+# can also write to, so a symlink planted there before a root-run install
+# or repair is a real, reachable attack, not a theoretical one; see
+# sm_ensure_config_scaffold's header. The check is repeated immediately
+# before every mutating call rather than once up front: the check and the
+# following syscall are never atomic in the shell, so re-checking closes
+# as much of that race as a shell script can. `chown -h` is used even
+# though a directory is never legitimately a symlink here (it is refused
+# above), as defence in depth for exactly that race: if a symlink is
+# planted in the gap between the last check and this call, `-h` changes
+# only the symlink's own ownership via lchown(2) rather than following it
+# into whatever it points at. `chmod` has no such flag on Linux (there is
+# no lchmod(2)), so the repeated `sm_refuse_symlink` check immediately
+# before it is the only defence available for that step.
+#
+# The chown target is overridable via SM_INSTALL_OWNER, the same pattern
+# sm_stage_binary in activate.sh uses, so this repository's own tests can
+# exercise a real, successful chown without an "fpp" system user existing
+# on the developer machine running them; production code never sets it
+# and gets the real fpp:fpp target.
+sm_scaffold_dir() {
+    local _sm_path _sm_mode _sm_mode_bare _sm_mkdir _sm_chown _sm_chmod
+    _sm_path="$1"
+    _sm_mode="$2"
+    _sm_mode_bare="${_sm_mode#0}"
 
-    # /usr/sbin/chown is a macOS-only location, listed only so this repo's
-    # own tests can run unmodified on a developer Mac; Debian FPP hosts
-    # always resolve chown from /bin or /usr/bin, listed first.
     _sm_mkdir=$(sm_resolve_bin mkdir /bin/mkdir /usr/bin/mkdir) || return 1
     _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || return 1
     _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
+
+    sm_refuse_symlink "$_sm_path" || return 1
+    "$_sm_mkdir" -p "$_sm_path" || {
+        sm_log_err "could not create directory: $_sm_path"
+        return 1
+    }
+    sm_refuse_symlink "$_sm_path" || return 1
+    "$_sm_chown" -h "${SM_INSTALL_OWNER:-fpp:fpp}" "$_sm_path" || {
+        sm_log_err "could not set ownership of $_sm_path to ${SM_INSTALL_OWNER:-fpp:fpp}"
+        return 1
+    }
+    sm_refuse_symlink "$_sm_path" || return 1
+    "$_sm_chmod" "$_sm_mode" "$_sm_path" || {
+        sm_log_err "could not set permissions on $_sm_path"
+        return 1
+    }
+    sm_verify_mode "$_sm_path" "$_sm_mode_bare"
+}
+
+# Creates file $1 (mode $2) with default content $3 if missing, and
+# chowns/chmods it to fpp:fpp, using the same refuse-rather-than-follow
+# discipline as sm_scaffold_dir above, plus one more step that directory
+# does not need: the file's own creation. `sm_create_new_file` uses the
+# shell's noclobber option so the existence check and the write happen as
+# one kernel-level operation, closing the specific hole a `[ ! -e ]` test
+# followed by a redirect left open: a dangling symlink reads as "does
+# not exist" under `-e` (it dereferences), so that older sequence let a
+# root-run redirect create a brand-new, root-written file at whatever
+# path the dangling symlink named.
+sm_scaffold_file() {
+    local _sm_path _sm_mode _sm_mode_bare _sm_default _sm_chown _sm_chmod
+    _sm_path="$1"
+    _sm_mode="$2"
+    _sm_default="$3"
+    _sm_mode_bare="${_sm_mode#0}"
+
+    _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || return 1
+    _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
+
+    sm_refuse_symlink "$_sm_path" || return 1
+    if [ ! -e "$_sm_path" ]; then
+        sm_create_new_file "$_sm_path" "$_sm_default" || return 1
+    fi
+    sm_refuse_symlink "$_sm_path" || return 1
+    "$_sm_chown" -h "${SM_INSTALL_OWNER:-fpp:fpp}" "$_sm_path" || {
+        sm_log_err "could not set ownership of $_sm_path to ${SM_INSTALL_OWNER:-fpp:fpp}"
+        return 1
+    }
+    sm_refuse_symlink "$_sm_path" || return 1
+    "$_sm_chmod" "$_sm_mode" "$_sm_path" || {
+        sm_log_err "could not set permissions on $_sm_path"
+        return 1
+    }
+    sm_verify_mode "$_sm_path" "$_sm_mode_bare"
+}
+
+# Creates the plugin's credential directory/file and non-secret state
+# directory/files, without overwriting anything that already exists. This
+# runs on every install, upgrade, and preStart repair, so an existing
+# credential or config must survive a re-run untouched.
+#
+# Every path here sits inside a directory the "fpp" system user can also
+# write to (fppd and this plugin's own binary both run as fpp), and this
+# function itself runs as root on every install, upgrade, and preStart
+# repair. Before the symlink refusals in sm_scaffold_dir and
+# sm_scaffold_file above existed, "fpp" planting a symlink at any of these
+# paths turned the next repair into a root-run chown/chmod, or a
+# root-written file creation, at whatever the symlink pointed to.
+# Verified against a real Debian container: a root:root 0644 file outside
+# this tree ended up fpp:fpp 0600 after one repair pass, and a dangling
+# symlink caused a brand-new fpp:fpp 0600 file to be created at its
+# target. Every mutating call below refuses a symlink rather than
+# following it.
+sm_ensure_config_scaffold() {
+    local _sm_creddir _sm_credfile _sm_credfile_is_new _sm_statedir
+    local _sm_name_default _sm_fname _sm_default _sm_fpath
 
     # Credential directory and file. Deliberately outside FPP's own
     # media/config tree — see sm_credential_dir's comment in common.sh for
     # why — so nothing FPP itself serves over HTTP can reach it.
     _sm_creddir=$(sm_credential_dir)
-    "$_sm_mkdir" -p "$_sm_creddir" || {
-        sm_log_err "could not create credential directory: $_sm_creddir"
-        return 1
-    }
-    "$_sm_chown" fpp:fpp "$_sm_creddir" || {
-        sm_log_err "could not set ownership of $_sm_creddir to fpp:fpp"
-        return 1
-    }
-    "$_sm_chmod" 0700 "$_sm_creddir" || {
-        sm_log_err "could not set permissions on $_sm_creddir"
-        return 1
-    }
-    sm_verify_mode "$_sm_creddir" 700 || return 1
+    sm_scaffold_dir "$_sm_creddir" 0700 || return 1
 
     _sm_credfile=$(sm_credential_file)
-    if [ ! -e "$_sm_credfile" ]; then
-        : > "$_sm_credfile" || {
-            sm_log_err "could not create credential file: $_sm_credfile"
-            return 1
-        }
+    _sm_credfile_is_new=0
+    if [ ! -e "$_sm_credfile" ] && [ ! -L "$_sm_credfile" ]; then
+        _sm_credfile_is_new=1
+    fi
+    sm_scaffold_file "$_sm_credfile" 0600 "" || return 1
+    # Logged only after sm_scaffold_file actually succeeds, not merely
+    # attempted: a log line claiming a file was created must not fire
+    # ahead of confirming the creation (and the ownership and mode that
+    # follow it) actually went through.
+    if [ "$_sm_credfile_is_new" -eq 1 ]; then
         sm_log "created empty credential file at $_sm_credfile; it must be provisioned with a scheduler credential before the plugin can act"
     fi
-    "$_sm_chown" fpp:fpp "$_sm_credfile" || {
-        sm_log_err "could not set ownership of $_sm_credfile to fpp:fpp"
-        return 1
-    }
-    "$_sm_chmod" 0600 "$_sm_credfile" || {
-        sm_log_err "could not set permissions on $_sm_credfile"
-        return 1
-    }
-    sm_verify_mode "$_sm_credfile" 600 || return 1
 
     # Non-secret state directory and files, under FPP's media tree.
     _sm_statedir=$(sm_state_dir)
-    "$_sm_mkdir" -p "$_sm_statedir" || {
-        sm_log_err "could not create state directory: $_sm_statedir"
-        return 1
-    }
-    "$_sm_chown" fpp:fpp "$_sm_statedir" || {
-        sm_log_err "could not set ownership of $_sm_statedir to fpp:fpp"
-        return 1
-    }
-    "$_sm_chmod" 0700 "$_sm_statedir" || {
-        sm_log_err "could not set permissions on $_sm_statedir"
-        return 1
-    }
-    sm_verify_mode "$_sm_statedir" 700 || return 1
+    sm_scaffold_dir "$_sm_statedir" 0700 || return 1
 
     # 0600, matching what the binary itself uses when it rewrites these
     # files — the scaffold and the binary must agree on one mode rather
@@ -103,21 +172,7 @@ sm_ensure_config_scaffold() {
         _sm_fname="${_sm_name_default%%:*}"
         _sm_default="${_sm_name_default#*:}"
         _sm_fpath="$_sm_statedir/$_sm_fname"
-        if [ ! -e "$_sm_fpath" ]; then
-            printf '%s\n' "$_sm_default" > "$_sm_fpath" || {
-                sm_log_err "could not create $_sm_fpath"
-                return 1
-            }
-        fi
-        "$_sm_chown" fpp:fpp "$_sm_fpath" || {
-            sm_log_err "could not set ownership of $_sm_fpath to fpp:fpp"
-            return 1
-        }
-        "$_sm_chmod" 0600 "$_sm_fpath" || {
-            sm_log_err "could not set permissions on $_sm_fpath"
-            return 1
-        }
-        sm_verify_mode "$_sm_fpath" 600 || return 1
+        sm_scaffold_file "$_sm_fpath" 0600 "$_sm_default" || return 1
     done
 
     return 0
@@ -138,7 +193,7 @@ sm_ensure_config_scaffold() {
 sm_install_binary() {
     local _sm_plugin_dir _sm_fppdir _sm_version _sm_arch _sm_tarball_name
     local _sm_base_url _sm_expected_hash _sm_mktemp _sm_workdir _sm_rm _sm_tar
-    local _sm_target _sm_staging _sm_stamp_failed
+    local _sm_target _sm_staging
     _sm_plugin_dir="$1"
     _sm_fppdir="$2"
     _sm_version="$3"
@@ -248,27 +303,29 @@ sm_install_binary() {
     # touching the binary that is already correctly in place.
     sm_activate_commit "$_sm_target"
 
-    # Each stamp is written to a temp file and renamed onto its final
-    # path (sm_write_stamp), never written in place: an in-place write
-    # that fails partway (a full disk, a write-limited filesystem) would
+    # The stamp is written to a temp file and renamed onto its final path
+    # (sm_write_stamp), never written in place: an in-place write that
+    # fails partway (a full disk, a write-limited filesystem) would
     # otherwise truncate an existing stamp to empty rather than leaving it
     # unchanged, and an empty stamp read back later is indistinguishable
     # from "nothing to compare" in exactly the guard this stamp exists to
-    # feed (see sm_arch_repair_reason in lib/arch.sh).
-    _sm_stamp_failed=0
-
+    # feed (see sm_arch_repair_reason in lib/arch.sh). sm_write_stamp_or_
+    # sentinel additionally makes a failed write on a FRESH path (nothing
+    # was ever recorded there) self-correcting, rather than permanently
+    # invisible to that same guard; see its own comment in activate.sh.
+    #
+    # There is no installed-version stamp: an earlier version of this
+    # function wrote one next to the architecture stamp, but nothing in
+    # this repository, or in preStart.sh's repair guard, ever read it
+    # back. A stamp with no consumer only produced a spurious repair-
+    # failure report on a failed write with no compensating benefit, so
+    # it was removed rather than given a reader it does not need.
+    #
     # See sm_arch_stamp_path's comment: this is what lets preStart.sh
     # catch a cloned-image, wrong-architecture binary that an [ -x ] check
     # alone cannot distinguish from a healthy install.
-    if ! sm_write_stamp "$(sm_arch_stamp_path "$_sm_plugin_dir")" "$_sm_arch"; then
+    if ! sm_write_stamp_or_sentinel "$(sm_arch_stamp_path "$_sm_plugin_dir")" "$_sm_arch"; then
         sm_log_err "could not write architecture stamp for $_sm_target; the newly activated binary is live and verified, but this stamp was not recorded"
-        _sm_stamp_failed=1
-    fi
-    if ! sm_write_stamp "$(sm_version_stamp_path "$_sm_plugin_dir")" "$_sm_version"; then
-        sm_log_err "could not write installed-version stamp for $_sm_target; the newly activated binary is live and verified, but this stamp was not recorded"
-        _sm_stamp_failed=1
-    fi
-    if [ "$_sm_stamp_failed" -eq 1 ]; then
         return 1
     fi
 

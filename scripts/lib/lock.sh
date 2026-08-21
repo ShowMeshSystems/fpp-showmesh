@@ -86,12 +86,14 @@ sm_lock_version() {
 # filename instead of reading into a neighbouring artifact's fields when
 # several objects share one physical line.
 sm_lock_sha256() {
-    local _sm_lock_file _sm_filename _sm_grep _sm_sed _sm_marker
+    local _sm_lock_file _sm_filename _sm_grep _sm_sed _sm_tr _sm_marker
     local _sm_flat _sm_objects _sm_count _sm_object _sm_rest _sm_hash
+    local _sm_sha_matches _sm_sha_count
     _sm_lock_file="$1"
     _sm_filename="$2"
     _sm_grep=$(sm_resolve_bin grep /usr/bin/grep /bin/grep) || return 1
     _sm_sed=$(sm_resolve_bin sed /usr/bin/sed /bin/sed) || return 1
+    _sm_tr=$(sm_resolve_bin tr /usr/bin/tr /bin/tr) || return 1
 
     if [ ! -f "$_sm_lock_file" ]; then
         sm_log_err "artifacts.lock.json not found at $_sm_lock_file"
@@ -102,18 +104,22 @@ sm_lock_sha256() {
         return 1
     fi
 
-    _sm_flat=$(tr '\n' ' ' < "$_sm_lock_file")
+    _sm_flat=$("$_sm_tr" '\n' ' ' < "$_sm_lock_file")
     _sm_objects=$(printf '%s' "$_sm_flat" | "$_sm_sed" -E 's/\}[[:space:]]*,[[:space:]]*\{/}\
 {/g')
 
     _sm_marker="\"filename\": \"$_sm_filename\""
 
-    # Counts OCCURRENCES of the marker, not matching LINES: with every
-    # object now on its own line this is the same number, but the
-    # distinction matters because a naive `grep -c` against the ORIGINAL,
-    # unsplit file undercounts two duplicate entries minified onto one
-    # physical line as a single match, letting this guard miss them.
-    _sm_count=$(printf '%s\n' "$_sm_objects" | "$_sm_grep" -Fc "$_sm_marker" 2>/dev/null)
+    # Counts OCCURRENCES of the marker, not matching LINES. `grep -Fc`
+    # counts matching LINES, which undercounts two duplicate entries that
+    # share one physical, minified line as a single match: a single
+    # object with a duplicated "filename" key on one line passed this
+    # guard silently for exactly that reason. `grep -Fo` instead prints
+    # each occurrence on its own output line, one match per line even
+    # when several matches share one input line, so counting the LINES
+    # of that output counts occurrences correctly regardless of how many
+    # matches started out sharing a physical line.
+    _sm_count=$(printf '%s\n' "$_sm_objects" | "$_sm_grep" -Fo "$_sm_marker" | "$_sm_grep" -Fc "$_sm_marker" 2>/dev/null)
     _sm_count="${_sm_count:-0}"
     if [ "$_sm_count" -eq 0 ]; then
         sm_log_err "artifacts.lock.json has no entry for $_sm_filename"
@@ -132,15 +138,46 @@ sm_lock_sha256() {
     # repository generates and commits its own lock in exactly that key
     # order, and a regenerated lock that reorders an object's keys is not
     # a shape this parser guesses at — see the empty-result branch below.
+    #
+    # More than one "sha256" occurrence within this one isolated entry,
+    # for example a nested object under some other key that happens to
+    # carry its own "sha256" field, is refused rather than resolved by
+    # picking the first match: that used to silently return the NESTED
+    # value at exit 0 for an entry shaped like
+    # { "filename": "X", "meta": { "sha256": "…" }, "sha256": "…" },
+    # never the entry's own top-level hash, with no indication anything
+    # was wrong. `grep -o` again prints one occurrence per output line
+    # (see the marker count above), so counting those lines catches this
+    # the same way.
     _sm_rest="${_sm_object#*"$_sm_marker"}"
-    _sm_hash=$(printf '%s\n' "$_sm_rest" | "$_sm_grep" -o '"sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | "$_sm_sed" -E 's/.*:[[:space:]]*"([^"]*)"/\1/' | "$_sm_sed" -n '1p')
+    _sm_sha_matches=$(printf '%s\n' "$_sm_rest" | "$_sm_grep" -o '"sha256"[[:space:]]*:[[:space:]]*"[^"]*"')
+    _sm_sha_count=$(printf '%s\n' "$_sm_sha_matches" | "$_sm_grep" -Fc '"sha256"' 2>/dev/null)
+    _sm_sha_count="${_sm_sha_count:-0}"
 
-    if [ -z "$_sm_hash" ]; then
+    if [ "$_sm_sha_count" -eq 0 ]; then
         if printf '%s\n' "$_sm_object" | "$_sm_grep" -q '"sha256"'; then
             sm_log_err "artifacts.lock.json entry for $_sm_filename has a \"sha256\" field that does not come after \"filename\" in the source text; refusing a lock this parser cannot read unambiguously rather than guessing at a different key order"
         else
             sm_log_err "artifacts.lock.json entry for $_sm_filename has no sha256 field"
         fi
+        return 1
+    fi
+    if [ "$_sm_sha_count" -gt 1 ]; then
+        sm_log_err "artifacts.lock.json entry for $_sm_filename has $_sm_sha_count \"sha256\" fields within its own entry (possibly one nested inside another key); refusing an ambiguous lock rather than picking one"
+        return 1
+    fi
+
+    _sm_hash=$(printf '%s\n' "$_sm_sha_matches" | "$_sm_sed" -E 's/.*:[[:space:]]*"([^"]*)"/\1/')
+
+    # A "sha256" field that matched (so it DID come after "filename", and
+    # there is exactly one of it) but whose value is the empty string is
+    # a different, more specific problem than either branch above: the
+    # field is present, in the right place, just empty. Reporting it as
+    # "does not come after filename", which the old check for -z
+    # "$_sm_hash" could not tell apart from this case, described
+    # something that was not actually true about the source text.
+    if [ -z "$_sm_hash" ]; then
+        sm_log_err "artifacts.lock.json entry for $_sm_filename has an empty sha256 value"
         return 1
     fi
 

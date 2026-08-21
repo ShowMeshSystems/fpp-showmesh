@@ -195,6 +195,24 @@ sm_activate_commit() {
 # build of this function (or an interrupted run) could leave one behind,
 # and `rm -f` alone cannot remove it, which otherwise breaks every later
 # write to the same stamp with no way to recover.
+#
+# A symlink check alone at the temp path is not enough: a HARD link
+# planted there (a second name for an existing file's inode, `ln` with no
+# `-s`) passes both the `-L` check above and `-d` below, since it looks
+# exactly like an ordinary regular file. The `printf` that used to write
+# straight into $_sm_tmp would then truncate and overwrite whatever that
+# other name's content was, in place, before the rename ever ran.
+# Verified: hard-linking a victim file to the temp path and writing a
+# stamp replaced the victim's content, at exit 0. `rm -f "$_sm_tmp"`
+# first removes only that ONE name (unlinking never touches the data
+# other names still point at, the same reasoning that makes the final
+# rename below safe against a hard link at the DESTINATION), guaranteeing
+# the write that follows always lands in a brand-new inode. The write
+# itself uses the shell's noclobber option so the existence check
+# (nothing is left at $_sm_tmp after the `rm -f` above) and the create
+# happen as one kernel-level operation: anything raced into that name in
+# the gap between the `rm -f` and this write, symlink or hard link, is
+# refused rather than written through.
 sm_write_stamp() {
     local _sm_path _sm_content _sm_tmp _sm_rm
     _sm_path="$1"
@@ -227,7 +245,8 @@ sm_write_stamp() {
         fi
     fi
 
-    if ! printf '%s\n' "$_sm_content" > "$_sm_tmp"; then
+    "$_sm_rm" -f "$_sm_tmp"
+    if ! ( set -C; printf '%s\n' "$_sm_content" > "$_sm_tmp" ) 2>/dev/null; then
         sm_log_err "could not write stamp file $_sm_tmp"
         "$_sm_rm" -f "$_sm_tmp"
         return 1
@@ -238,6 +257,39 @@ sm_write_stamp() {
         return 1
     fi
     return 0
+}
+
+# Writes stamp $1 via sm_write_stamp; on failure, makes a best-effort
+# attempt to leave an EMPTY file at $1 rather than nothing at all, but
+# only when nothing already occupies that path (no file, no symlink).
+#
+# sm_arch_repair_reason (lib/arch.sh) already treats an EXISTING but empty
+# stamp as needing repair, and treats a MISSING stamp as health (read as
+# "installed by a version of this repository before the stamp existed").
+# That second reading is right for an upgrade from an old install, but
+# wrong for a stamp write that fails on this run: on a first install,
+# nothing was ever there to have predated the stamp, so a failed write
+# left the exact same on-disk state as a healthy pre-stamp install would
+# have: permanently invisible to the repair guard, even after this host
+# is later cloned onto different-architecture hardware. Verified: with no
+# stamp on disk and detection disagreeing with the binary, the repair
+# reason came back empty and preStart exited 0.
+#
+# Leaving the sentinel only when nothing already exists preserves
+# sm_write_stamp's own guarantee for the other case: a transient failure
+# writing OVER an already-recorded, good stamp must leave that stamp
+# exactly as it was, not blank it out.
+sm_write_stamp_or_sentinel() {
+    local _sm_path _sm_content
+    _sm_path="$1"
+    _sm_content="$2"
+    if sm_write_stamp "$_sm_path" "$_sm_content"; then
+        return 0
+    fi
+    if [ ! -e "$_sm_path" ] && [ ! -L "$_sm_path" ]; then
+        ( set -C; : > "$_sm_path" ) 2>/dev/null
+    fi
+    return 1
 }
 
 # Undoes a successful sm_activate_binary swap after a LATER failure in the
