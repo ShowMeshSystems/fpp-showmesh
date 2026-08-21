@@ -24,6 +24,18 @@ sm_lock_path() {
 }
 
 # Prints the lock file's top-level "version" field.
+#
+# Anchored to the START of a line, not just matched anywhere in the file:
+# this repository's own lock format writes every top-level key on its own
+# line ("  \"version\": \"0.1.0\","), while each per-artifact object is a
+# single compact line ("    { \"filename\": ..., \"sha256\": ... }"); see
+# sm_lock_sha256 below for why. A "version" key that ended up inside one
+# of those artifact objects would sit in the middle of that object's line,
+# never at the line's start, regardless of whether that object happens to
+# appear before or after the top-level "version" key in the raw text. So
+# anchoring on line-start is what actually targets the top-level field
+# specifically; picking the first match in file order (what this function
+# used to do) is only correct by accident, for exactly one key ordering.
 sm_lock_version() {
     local _sm_lock_file _sm_grep _sm_sed _sm_line
     _sm_lock_file="$1"
@@ -34,8 +46,12 @@ sm_lock_version() {
         sm_log_err "artifacts.lock.json not found at $_sm_lock_file"
         return 1
     fi
+    if [ ! -r "$_sm_lock_file" ]; then
+        sm_log_err "artifacts.lock.json not readable at $_sm_lock_file"
+        return 1
+    fi
 
-    _sm_line=$("$_sm_grep" -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$_sm_lock_file" | head -n 1)
+    _sm_line=$("$_sm_grep" -m 1 -o '^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$_sm_lock_file")
     if [ -z "$_sm_line" ]; then
         sm_log_err "artifacts.lock.json at $_sm_lock_file has no top-level \"version\" field"
         return 1
@@ -62,8 +78,13 @@ sm_lock_sha256() {
         sm_log_err "artifacts.lock.json not found at $_sm_lock_file"
         return 1
     fi
+    if [ ! -r "$_sm_lock_file" ]; then
+        sm_log_err "artifacts.lock.json not readable at $_sm_lock_file"
+        return 1
+    fi
 
-    _sm_count=$("$_sm_grep" -Fc "\"filename\": \"$_sm_filename\"" "$_sm_lock_file")
+    _sm_count=$("$_sm_grep" -Fc "\"filename\": \"$_sm_filename\"" "$_sm_lock_file" 2>/dev/null)
+    _sm_count="${_sm_count:-0}"
     if [ "$_sm_count" -eq 0 ]; then
         sm_log_err "artifacts.lock.json has no entry for $_sm_filename"
         return 1
@@ -73,8 +94,18 @@ sm_lock_sha256() {
         return 1
     fi
 
+    # Even though the filename count check above confirms only one LINE
+    # contains this filename, a minified lock file can put every artifact
+    # object on one single physical line, in which case that "line" also
+    # contains every OTHER artifact's "sha256" key, and grep -o emits one
+    # output line per match, not per input line: "-m 1" does not limit
+    # that (it caps matching INPUT lines, and there is only one to begin
+    # with here), so it would not help. `sed -n '1p'` after -o is what
+    # actually keeps only the first extracted match, and validating that
+    # single value below is what keeps a minified lock from producing more
+    # than one hash out of a check meant to name exactly one.
     _sm_line=$("$_sm_grep" -F "\"filename\": \"$_sm_filename\"" "$_sm_lock_file")
-    _sm_hash=$(printf '%s\n' "$_sm_line" | "$_sm_grep" -o '"sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | "$_sm_sed" -E 's/.*:[[:space:]]*"([^"]*)"/\1/')
+    _sm_hash=$(printf '%s\n' "$_sm_line" | "$_sm_grep" -o '"sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | "$_sm_sed" -E 's/.*:[[:space:]]*"([^"]*)"/\1/' | "$_sm_sed" -n '1p')
     if [ -z "$_sm_hash" ]; then
         sm_log_err "artifacts.lock.json entry for $_sm_filename has no sha256 field"
         return 1

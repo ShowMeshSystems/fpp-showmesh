@@ -133,8 +133,10 @@ sm_ensure_config_scaffold() {
 # why that distinction matters. Activation is stage-then-swap (see
 # lib/activate.sh): the new binary is fully staged and validated before
 # anything at the live target path is touched, and the previous binary is
-# preserved until the atomic rename that activates the new one is known
-# to have succeeded.
+# preserved not just until the atomic rename that activates the new one
+# succeeds, but until this function's own post-activation checks (mode
+# re-verification, the arch-stamp write) also succeed; see the
+# transaction-boundary comment inside sm_install_binary below.
 sm_install_binary() {
     local _sm_plugin_dir _sm_fppdir _sm_version _sm_arch _sm_tarball_name
     local _sm_base_url _sm_expected_hash _sm_mktemp _sm_workdir _sm_rm _sm_tar
@@ -218,18 +220,35 @@ sm_install_binary() {
         return 1
     fi
 
+    # Transaction boundary: sm_activate_binary's rename already made the
+    # new binary live, but the previous binary is deliberately still
+    # preserved at $_sm_target.previous until the two steps below also
+    # succeed. Either one failing rolls the live binary back to what was
+    # running before this install started, via sm_activate_rollback,
+    # instead of reporting the install as failed while actually leaving
+    # the new, unverified binary live with no way back, which is what
+    # happened before this boundary existed here.
+
     # Cheap re-confirmation that the rename actually landed a 0755 binary
     # at the target, in the same spirit as every other mode check in this
     # repository trusting a readback over an exit code alone.
-    sm_verify_mode "$_sm_target" 755 || return 1
+    if ! sm_verify_mode "$_sm_target" 755; then
+        sm_activate_rollback "$_sm_target"
+        return 1
+    fi
 
     # See sm_arch_stamp_path's comment: this is what lets preStart.sh
     # catch a cloned-image, wrong-architecture binary that an [ -x ] check
     # alone cannot distinguish from a healthy install.
     if ! printf '%s\n' "$_sm_arch" > "$(sm_arch_stamp_path "$_sm_plugin_dir")"; then
         sm_log_err "could not write architecture stamp for $_sm_target"
+        sm_activate_rollback "$_sm_target"
         return 1
     fi
+
+    # Both post-activation steps succeeded: the transaction is committed,
+    # and the previous binary is no longer needed.
+    sm_activate_commit "$_sm_target"
 
     sm_log "installed showmesh-fpp-plugin $_sm_version ($_sm_arch) to $_sm_target"
     return 0

@@ -41,10 +41,20 @@ _sm_binary="$_sm_plugin_dir/showmesh-fpp-plugin"
 
 _sm_fppdir=$(sm_fppdir "${FPPDIR:-}")
 
+_sm_try_local_repair=0
 if [ ! -x "$_sm_binary" ]; then
     _sm_repair_reason="binary missing or not executable at $_sm_binary"
+    # Only this case, not the arch-mismatch one below, is worth trying to
+    # repair locally: a cloned-image binary that is present but the wrong
+    # architecture would, if it has one, have a .previous of the same
+    # wrong architecture too, so promoting it fixes nothing. A missing or
+    # non-executable binary is the case a crash between staging and the
+    # final activation rename (or between activation and the transaction
+    # actually committing) can leave behind, with a good binary sitting
+    # right next to the empty target, unused.
+    _sm_try_local_repair=1
 else
-    # sm_arch_repair_reason is the testable form of this comparison — see
+    # sm_arch_repair_reason is the testable form of this comparison; see
     # its comment in lib/arch.sh for why it is a function and not left
     # inline here.
     _sm_repair_reason=$(sm_arch_repair_reason "$_sm_plugin_dir" "$_sm_fppdir")
@@ -58,11 +68,17 @@ fi
 
 sm_log "repair needed: $_sm_repair_reason"
 
+. "$_sm_script_dir/lib/activate.sh"
+
+if [ "$_sm_try_local_repair" -eq 1 ] && sm_activate_local_repair "$_sm_binary"; then
+    sm_log "repair complete (promoted a local binary; no network reached)"
+    exit 0
+fi
+
 . "$_sm_script_dir/lib/fetch.sh"
 . "$_sm_script_dir/lib/verify.sh"
 . "$_sm_script_dir/lib/commands.sh"
 . "$_sm_script_dir/lib/lock.sh"
-. "$_sm_script_dir/lib/activate.sh"
 . "$_sm_script_dir/lib/install-core.sh"
 
 _sm_version_file="$_sm_plugin_dir/VERSION"

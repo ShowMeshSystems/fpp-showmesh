@@ -15,11 +15,6 @@ sm_artifact_tarball_name() {
     printf 'showmesh-fpp-plugin_%s_linux_%s.tar.gz\n' "$1" "$2"
 }
 
-sm_artifact_sums_name() {
-    # $1 = version
-    printf 'showmesh-fpp-plugin_%s_SHA256SUMS\n' "$1"
-}
-
 sm_artifact_base_url() {
     # $1 = version
     if [ -n "$SHOWMESH_PLUGIN_ARTIFACT_BASE_URL" ]; then
@@ -29,15 +24,16 @@ sm_artifact_base_url() {
     fi
 }
 
-# The tarball and its checksum manifest are always fetched from the same
-# base URL, so this does not defend against a compromised or redirected
-# host — checksum verification only catches transport corruption between
-# a URL and what actually arrives, not a bad-faith host serving a
-# consistent, self-signed pair. What this function catches is a base URL
-# with no scheme at all (a plain typo, or an override with the scheme
-# accidentally dropped), and it makes a plain-http override loud rather
-# than silent, since SHOWMESH_PLUGIN_ARTIFACT_BASE_URL enforces no scheme
-# by itself and curl/wget will follow whatever they are given.
+# The installer's actual trust gate no longer fetches a checksum manifest
+# from this base URL at all; sm_install_binary verifies a downloaded
+# tarball against this repository's own committed artifacts.lock.json
+# (see lib/lock.sh), not against anything fetched over curl (see
+# verify.sh's header for why that distinction matters). This function's
+# only job is catching a base URL with no scheme at all (a plain typo, or
+# an override with the scheme accidentally dropped), and making a
+# plain-http override loud rather than silent, since
+# SHOWMESH_PLUGIN_ARTIFACT_BASE_URL enforces no scheme by itself and
+# curl/wget will follow whatever they are given.
 sm_check_base_url_scheme() {
     local _sm_url
     _sm_url="$1"

@@ -21,6 +21,19 @@
 # not atomic). Staging in the target's own directory is what makes the
 # final activation step actually atomic rather than merely renamed-shaped.
 #
+# The activation swap itself is exactly ONE rename: staging onto target.
+# An earlier version of this file preserved the previous binary by
+# renaming it aside to target.previous first, then renaming staging onto
+# target second: two renames, with a real window between them where
+# rename(2) has already vacated the target name but not yet reoccupied
+# it, so a crash in that window leaves no binary at all. A hard link
+# costs nothing to create (it does not move or copy the underlying file,
+# it just adds a second name for the same inode) and, unlike a rename,
+# creating it never removes the original name, so the previous binary
+# stays live under $target for the entire time its backup name is being
+# created. That is what turns the swap back into a genuine single
+# atomic rename: the target name is never briefly unoccupied.
+#
 # Requires scripts/lib/common.sh to already be sourced.
 
 # Thin wrapper around `mv -f`, factored out to one call site so tests can
@@ -85,19 +98,28 @@ sm_stage_binary() {
 }
 
 # Activates a fully staged and validated binary at $1 onto final target
-# $2, preserving whatever was previously at $2 until the swap is known to
-# have succeeded, and rolling that previous binary back into place if it
-# does not.
+# $2, preserving whatever was previously at $2 as $2.previous until the
+# swap is known to have succeeded.
 #
-# Sequence: if a previous binary exists at the target, rename it aside to
-# $2.previous (still an atomic, same-directory rename); then rename the
-# staged binary onto the target, the one step that actually makes the
-# new binary live. If that second rename fails and a previous binary was
-# set aside, it is renamed back. If there was no previous binary (a fresh
-# install) and activation fails, nothing is left half-installed: the
-# staging file is removed and the target was never created.
+# Sequence: if a previous binary exists at the target, give it a second
+# name at $2.previous with `ln` (a hard link, not a rename; see the file
+# header for why that is what closes the crash window a rename-based
+# backup left open); fall back to a plain `cp -p` only if the link itself
+# fails (e.g. a filesystem that does not support hard links; same-
+# directory same-filesystem should never cross filesystems, but this
+# stays defensive rather than assuming that). Then rename the staged
+# binary onto the target: the one step that actually makes the new binary
+# live, and, because it is a single rename, either fully done or entirely
+# undone after a crash: there is no partial state for a crash to land in
+# between. If that rename fails, the target was never touched by it (a
+# failed rename(2) leaves both names exactly as they were), so there is
+# nothing to roll back: the previous binary is still live under $2 the
+# whole time, and only the now-unneeded backup and staging files are
+# cleaned up. If there was no previous binary (a fresh install) and
+# activation fails, nothing is left half-installed either: the staging
+# file is removed and the target was never created.
 sm_activate_binary() {
-    local _sm_staging _sm_target _sm_backup _sm_rm _sm_had_previous
+    local _sm_staging _sm_target _sm_backup _sm_rm _sm_ln _sm_cp _sm_had_previous
     _sm_staging="$1"
     _sm_target="$2"
     _sm_backup="$_sm_target.previous"
@@ -106,30 +128,118 @@ sm_activate_binary() {
 
     if [ -e "$_sm_target" ]; then
         "$_sm_rm" -f "$_sm_backup"
-        if ! sm_atomic_rename "$_sm_target" "$_sm_backup"; then
-            sm_log_err "could not preserve previous binary at $_sm_target before activating the new one; refusing to proceed"
+
+        _sm_ln=$(sm_resolve_bin ln /bin/ln /usr/bin/ln) || {
             "$_sm_rm" -f "$_sm_staging"
             return 1
+        }
+        if ! "$_sm_ln" "$_sm_target" "$_sm_backup"; then
+            _sm_cp=$(sm_resolve_bin cp /bin/cp /usr/bin/cp) || {
+                "$_sm_rm" -f "$_sm_staging"
+                return 1
+            }
+            if ! "$_sm_cp" -p "$_sm_target" "$_sm_backup"; then
+                sm_log_err "could not preserve previous binary at $_sm_target before activating the new one (hard link and copy fallback both failed); refusing to proceed"
+                "$_sm_rm" -f "$_sm_staging"
+                return 1
+            fi
         fi
         _sm_had_previous=1
     fi
 
     if ! sm_atomic_rename "$_sm_staging" "$_sm_target"; then
-        sm_log_err "activation failed: could not rename staged binary $_sm_staging onto $_sm_target"
+        sm_log_err "activation failed: could not rename staged binary $_sm_staging onto $_sm_target; a failed rename leaves $_sm_target as it was, so the previous binary there is unaffected and no rollback is needed"
         if [ "$_sm_had_previous" -eq 1 ]; then
-            if sm_atomic_rename "$_sm_backup" "$_sm_target"; then
-                sm_log_err "rolled back to the previous binary at $_sm_target after activation failed"
-            else
-                sm_log_err "activation failed AND rollback of the previous binary from $_sm_backup to $_sm_target also failed; $_sm_target may now be missing or wrong"
-            fi
+            "$_sm_rm" -f "$_sm_backup"
         fi
         "$_sm_rm" -f "$_sm_staging"
         return 1
     fi
 
-    if [ "$_sm_had_previous" -eq 1 ]; then
-        "$_sm_rm" -f "$_sm_backup"
+    # The backup is deliberately NOT removed here on success. The swap
+    # above is only one step of the caller's activation transaction; see
+    # sm_activate_commit and sm_activate_rollback below, and
+    # sm_install_binary in install-core.sh, which owns deciding when the
+    # transaction is actually finished.
+    return 0
+}
+
+# Finalizes a successful activation by discarding the preserved previous
+# binary at $1.previous. Callers must not call this until every failable
+# step in their activation transaction has succeeded (see
+# sm_install_binary in install-core.sh); the whole point of keeping the
+# previous binary around after a successful swap is so a failure later in
+# the same install (a failed mode re-verification, a failed arch-stamp
+# write) can still be rolled back to it.
+sm_activate_commit() {
+    local _sm_target _sm_rm
+    _sm_target="$1"
+    _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
+    "$_sm_rm" -f "$_sm_target.previous"
+}
+
+# Rolls $1 back to its preserved previous binary after a failure that
+# happened AFTER sm_activate_binary's swap already succeeded. (A failure
+# of the swap itself needs no rollback at all; see sm_activate_binary's
+# own comment; this function is for the case where the swap worked and a
+# later step in the same transaction did not.) Renames $1.previous back
+# onto $1: a single atomic rename, the same all-or-nothing operation
+# sm_activate_binary itself relies on.
+sm_activate_rollback() {
+    local _sm_target _sm_backup
+    _sm_target="$1"
+    _sm_backup="$_sm_target.previous"
+
+    if [ ! -e "$_sm_backup" ]; then
+        sm_log_err "cannot roll back $_sm_target: no preserved previous binary at $_sm_backup"
+        return 1
+    fi
+    if sm_atomic_rename "$_sm_backup" "$_sm_target"; then
+        sm_log_err "rolled back $_sm_target to its previous binary after a post-activation failure"
+        return 0
+    fi
+    sm_log_err "rollback of $_sm_target from $_sm_backup also failed; $_sm_target may now be missing or wrong"
+    return 1
+}
+
+# Local-only repair: promotes an already-preserved previous binary, or a
+# fully staged-and-validated but never-activated one, onto $1 without any
+# network access. Meant for preStart.sh's boot-time repair path, on a
+# short network budget, to try before it ever reaches for a download: a
+# crash between sm_activate_binary's backup step and its final rename
+# (or between staging and activation, on the very next run) leaves a
+# good binary sitting right next to the empty target, unused, while the
+# network repair below is what a networkless boot has no time for.
+#
+# Returns 0 (and leaves $1 live and executable) only if a local promotion
+# actually happened; returns 1 with nothing changed on disk if $1 is
+# already fine, or if no usable local binary was found to promote;
+# callers fall through to the network repair path in that case.
+sm_activate_local_repair() {
+    local _sm_target _sm_backup _sm_staging
+    _sm_target="$1"
+    _sm_backup="$_sm_target.previous"
+    _sm_staging="$_sm_target.staging"
+
+    if [ -x "$_sm_target" ]; then
+        return 1
     fi
 
-    return 0
+    if [ -f "$_sm_backup" ] && sm_verify_mode "$_sm_backup" 755 2>/dev/null; then
+        if sm_atomic_rename "$_sm_backup" "$_sm_target"; then
+            sm_log "promoted local previous binary at $_sm_backup to $_sm_target; no network repair needed"
+            return 0
+        fi
+        sm_log_err "found a local previous binary at $_sm_backup but could not promote it to $_sm_target"
+    fi
+
+    if [ -f "$_sm_staging" ] && sm_verify_mode "$_sm_staging" 755 2>/dev/null; then
+        if sm_atomic_rename "$_sm_staging" "$_sm_target"; then
+            sm_log "promoted local staged binary at $_sm_staging to $_sm_target; no network repair needed"
+            return 0
+        fi
+        sm_log_err "found a local staged binary at $_sm_staging but could not promote it to $_sm_target"
+    fi
+
+    return 1
 }

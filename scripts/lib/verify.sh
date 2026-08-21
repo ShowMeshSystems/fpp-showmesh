@@ -91,13 +91,27 @@ sm_verify_checksum() {
 # checking; the expected hash must arrive from a source a compromised
 # download host cannot also control: this repository's own
 # artifacts.lock.json (see lib/lock.sh), not a downloaded SHA256SUMS.
+#
+# This function is the actual trust gate sm_install_binary relies on, so
+# it validates its own $2 argument rather than trusting every caller to
+# have done so first: every current caller does validate upstream (lock.sh
+# itself refuses to return anything but a 64-hex value), but an empty or
+# malformed expected hash reaching here by some future bug must fail
+# closed on its own, not depend on `sha256sum` never coincidentally
+# producing the same malformed string.
 sm_verify_sha256() {
-    local _sm_path _sm_expected _sm_sha256sum _sm_awk _sm_actual
+    local _sm_path _sm_expected _sm_grep _sm_sha256sum _sm_awk _sm_actual
     _sm_path="$1"
     _sm_expected="$2"
 
     if [ ! -f "$_sm_path" ]; then
         sm_log_err "file not found to verify: $_sm_path"
+        return 1
+    fi
+
+    _sm_grep=$(sm_resolve_bin grep /usr/bin/grep /bin/grep) || return 1
+    if ! printf '%s' "$_sm_expected" | "$_sm_grep" -Eq '^[0-9a-f]{64}$'; then
+        sm_log_err "refusing to verify $_sm_path: expected-hash argument is not a non-empty 64-character hex string"
         return 1
     fi
 
