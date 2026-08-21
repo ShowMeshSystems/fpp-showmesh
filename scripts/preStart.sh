@@ -61,6 +61,8 @@ sm_log "repair needed: $_sm_repair_reason"
 . "$_sm_script_dir/lib/fetch.sh"
 . "$_sm_script_dir/lib/verify.sh"
 . "$_sm_script_dir/lib/commands.sh"
+. "$_sm_script_dir/lib/lock.sh"
+. "$_sm_script_dir/lib/activate.sh"
 . "$_sm_script_dir/lib/install-core.sh"
 
 _sm_version_file="$_sm_plugin_dir/VERSION"

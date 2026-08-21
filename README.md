@@ -45,17 +45,24 @@ like this:
 so bumping which release an installed plugin fetches is a one-line change
 here, not a rebuild.
 
-**Verification is not optional.** The installer downloads both the tarball
-and its checksum manifest and refuses to install anything whose SHA-256
-does not match the manifest entry for its exact filename. Be precise
-about what that buys: both files come from the same base URL, there is no
-digest pinned anywhere in this repository independent of that fetch, and
-no second origin cross-checks either one. This is not a defense against a
-compromised or redirected host serving a consistent, self-signed pair of
-bad bytes and a matching bad manifest. It catches transport corruption
-and a tarball tampered with after the manifest was fetched — which is
-what clears the registry's `unverified-package-install` finding, and no
-more than that.
+**Verification is not optional, and it is not against a downloaded
+manifest.** `artifacts.lock.json`, committed at this repository's own
+root, is the trust anchor: for the pinned `VERSION`, it records each
+tarball's exact filename and expected SHA-256, and the installer refuses
+to install anything whose downloaded bytes do not match the lock entry
+for that exact filename; a missing, malformed, or version-mismatched
+lock refuses the install outright rather than falling back to anything
+else. This is a deliberate change from checking a `SHA256SUMS` manifest
+fetched from the same base URL as the tarball: that manifest and the
+tarball both arrive over the same connection, so a compromised or
+redirected host can make them agree with each other regardless of what
+either actually contains, which checking one against the other cannot
+catch. `artifacts.lock.json` arrives with this repository's own checked-
+out tree, under FPP's control when it clones the plugin, not over curl,
+so it is a hash source a compromised download host cannot also serve. A
+`SHA256SUMS` manifest may still be published alongside a release, but
+nothing in the installer treats it as authoritative any more; see
+`scripts/lib/lock.sh` and `scripts/lib/verify.sh`.
 
 **The default URL above resolves to nothing today.** CI for the binary
 this installer fetches builds and self-verifies all three architectures'
@@ -116,6 +123,7 @@ method resolves only exists for a 64-bit kernel report.
 ```
 pluginInfo.json              FPP's plugin manifest (strict JSON)
 VERSION                      the release version scripts/fpp_install.sh fetches
+artifacts.lock.json          the trust anchor: expected filename/sha256 per artifact for VERSION
 docs/
   bench-capture-fpp-9.5.3.md  file paths, line numbers, and quoted source for every
                               claim below marked "confirmed against FPP 9.5.3"
@@ -133,14 +141,18 @@ scripts/
     common.sh                 absolute-path tool resolution, logging, shared paths, mode/owner verification
     arch.sh                    the two-signal architecture probe, plus the arch-stamp comparison
     fetch.sh                   artifact naming, download, base-URL scheme enforcement
-    verify.sh                  checksum verification
+    verify.sh                  checksum verification (both a manifest-based check and the
+                              lock-anchored sm_verify_sha256 the installer actually trusts)
     commands.sh                validates descriptions.json against the scripts it names
+    lock.sh                    looks up the expected sha256 for a filename from artifacts.lock.json
+    activate.sh                 stage-then-swap binary activation with rollback
     install-core.sh            the shared install/upgrade body
 test/
-  run_tests.sh                unit tests: arch probe, checksum verification, command-script
-                              validation, sm_fppdir, URL scheme, mode verification, the
-                              preStart.sh repair-decision function, committed executable
-                              bits, and this repo's own shipped descriptions.json
+  run_tests.sh                unit tests: arch probe, checksum verification, lock lookup,
+                              stage/activate rollback, command-script validation, sm_fppdir,
+                              URL scheme, mode verification, the preStart.sh repair-decision
+                              function, committed executable bits, and this repo's own
+                              shipped descriptions.json
 ```
 
 ## What each script does
@@ -149,12 +161,17 @@ test/
   clones this repository into the plugin directory. First validates that
   every script named in `commands/descriptions.json` exists and is
   executable (see below), entirely locally and before any network access.
-  Then detects the host architecture, downloads the matching tarball and
-  checksum manifest, verifies the checksum, extracts and installs the
-  binary at mode `0755`, and creates the plugin's credential directory and
-  non-secret state directory (two separate locations — see "Paths" below)
-  and their files if they do not already exist. Never overwrites an
-  existing credential or config on a re-run.
+  Then detects the host architecture, looks up the expected SHA-256 for
+  that architecture's tarball in `artifacts.lock.json`, downloads the
+  tarball and verifies it against that lock entry, extracts it, stages the
+  binary and validates the stage (mode `0755`, ownership) before ever
+  touching the live target, then activates it with a single atomic rename
+  that preserves the previous binary until the rename is known to have
+  succeeded (see "The artifact contract" and `scripts/lib/activate.sh`).
+  It also creates the plugin's credential directory and non-secret state
+  directory (two separate locations — see "Paths" below) and their files
+  if they do not already exist. Never overwrites an existing credential or
+  config on a re-run.
 - **`fpp_upgrade.sh`** — the same core as install, including the same
   command-script validation. FPP 10 calls this first on upgrade; FPP 9.x
   and earlier ignore it entirely and call `fpp_install.sh` again instead,
@@ -365,11 +382,17 @@ without a confirmed answer for what that does, an unattended install or
 upgrade is exactly the context where a bad outcome would go uncaught.
 
 Also unverified in a different sense: `pluginInfo.json` declares support
-from FPP 8.4 through a full FPP 10.x entry, but the bench evidence above
-covers 9.5.3 only. The 9.x floor is grounded in a separate, prior,
-source-verified finding that FPP's install/uninstall scripts are
-byte-identical across the whole 8.4–9.4 range, which is why one `versions[]`
-entry for that whole regime is a defensible claim rather than a guess.
+from FPP 9.4 through a full FPP 10.x entry, but the bench evidence above
+covers 9.5.3 only. FPP 8 is not supported and the floor is pinned at 9.4,
+not lower: an earlier version of this document argued for reaching the
+floor down to 8.4 on the strength of a prior finding that FPP's
+install/uninstall scripts are byte-identical across the whole 8.4–9.4
+range. That finding is about script identity, not about this plugin
+having been exercised anywhere in the 8.4–9.3 span, and the accepted
+support commitment for this project is FPP 9.4 through 9.x and FPP 10.x
+only, so the `versions[]` entry now says exactly that instead of trading
+on identical scripts to claim a wider floor than the project has agreed
+to support.
 **The FPP 10 entry carries no equivalent grounding.** FPP 10 restructures
 install into two phases with a dependency-resolution callback and honors
 `fpp_upgrade.sh` first rather than ignoring it — a genuinely different
@@ -395,6 +418,16 @@ any FPP host involved:
   conventions above, plus the case where both happen to be present.
 - Checksum verification, including a genuinely tampered artifact and a
   missing manifest entry, both rejected.
+- `artifacts.lock.json` lookup: a filename that is in the lock, one that
+  is not, a lock pinned to a different version than the one being
+  installed, and the compromised-host case: a downloaded tarball and a
+  downloaded `SHA256SUMS` that agree with each other but disagree with the
+  committed lock, rejected on the lock's authority, not the manifest's.
+- Stage-then-swap binary activation (`sm_stage_binary`, `sm_activate_binary`):
+  a clean fresh install with no previous binary, a failure injected during
+  post-staging validation (mode/ownership) leaving the previous binary
+  untouched, and a failure injected in the atomic-rename swap itself after
+  staging succeeded, rolling the previous binary back into place.
 - Command-script validation: a script that exists and is executable, one
   that is missing, one that exists but is not executable, and a missing
   `descriptions.json`, each producing a distinguishable message — run both

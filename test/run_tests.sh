@@ -328,6 +328,101 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# artifacts.lock.json lookup: the trust anchor sm_install_binary actually
+# verifies against, instead of a checksum manifest fetched from the same
+# host as the tarball.
+# ---------------------------------------------------------------------------
+
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/lock.sh"
+
+echo "== artifacts.lock.json lookup =="
+
+_sm_lockdir="$_sm_tmp/lock"
+mkdir -p "$_sm_lockdir"
+_sm_hash_amd64=$(python3 -c "print('a' * 64)")
+_sm_hash_arm64=$(python3 -c "print('b' * 64)")
+cat > "$_sm_lockdir/artifacts.lock.json" <<JSON
+{
+  "version": "1.2.3",
+  "artifacts": [
+    { "filename": "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "$_sm_hash_amd64" },
+    { "filename": "showmesh-fpp-plugin_1.2.3_linux_arm64.tar.gz", "kind": "go-helper", "architecture": "arm64", "sha256": "$_sm_hash_arm64" }
+  ]
+}
+JSON
+
+assert_eq "sm_lock_version reads the lock's top-level version" "1.2.3" "$(sm_lock_version "$_sm_lockdir/artifacts.lock.json")"
+
+out=$(sm_lock_sha256 "$_sm_lockdir/artifacts.lock.json" "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz")
+assert_eq "a lock lookup hit returns the expected sha256" "$_sm_hash_amd64" "$out"
+
+out=$(sm_lock_sha256 "$_sm_lockdir/artifacts.lock.json" "showmesh-fpp-plugin_1.2.3_linux_armv7.tar.gz" 2>"$_sm_tmp/lock-miss.err")
+status=$?
+assert_failure "a lock lookup miss (filename not in the lock) is rejected" "$status"
+assert_contains "the lookup-miss message names the filename" "$(cat "$_sm_tmp/lock-miss.err")" "armv7"
+
+out=$(sm_lock_expected_sha256 "$_sm_lockdir" "9.9.9" "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz" 2>"$_sm_tmp/lock-mismatch.err")
+status=$?
+assert_failure "a version mismatch between the lock and the requested install is rejected" "$status"
+_sm_mismatch_err=$(cat "$_sm_tmp/lock-mismatch.err")
+assert_contains "the version-mismatch message names the lock's version" "$_sm_mismatch_err" "1.2.3"
+assert_contains "the version-mismatch message names the requested version" "$_sm_mismatch_err" "9.9.9"
+
+out=$(sm_lock_expected_sha256 "$_sm_tmp/lock-does-not-exist" "1.2.3" "whatever.tar.gz" 2>&1)
+status=$?
+assert_failure "a missing artifacts.lock.json is rejected, not silently skipped" "$status"
+
+# Malformed lock entry: a sha256 field present but not 64 hex characters.
+mkdir -p "$_sm_lockdir-malformed"
+cat > "$_sm_lockdir-malformed/artifacts.lock.json" <<'JSON'
+{
+  "version": "1.2.3",
+  "artifacts": [
+    { "filename": "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "not-a-real-hash" }
+  ]
+}
+JSON
+out=$(sm_lock_expected_sha256 "$_sm_lockdir-malformed" "1.2.3" "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz" 2>&1)
+status=$?
+assert_failure "a malformed sha256 value in the lock is rejected" "$status"
+
+# The compromised-host case this whole mechanism exists for: a downloaded
+# tarball and a downloaded SHA256SUMS agree with each other (as if the
+# manifest were generated from these same, tampered bytes), but disagree
+# with the committed lock. The old same-origin check (sm_verify_checksum)
+# would have accepted this pair; the actual install gate
+# (sm_lock_expected_sha256 + sm_verify_sha256) must not.
+_sm_compdir="$_sm_tmp/compromised"
+mkdir -p "$_sm_compdir"
+_sm_comp_tarball="showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz"
+printf 'attacker-controlled bytes, self-consistent with their own manifest\n' > "$_sm_compdir/$_sm_comp_tarball"
+_sm_attacker_hash=$(sha256sum "$_sm_compdir/$_sm_comp_tarball" | awk '{print $1}')
+printf '%s  %s\n' "$_sm_attacker_hash" "$_sm_comp_tarball" > "$_sm_compdir/SHA256SUMS"
+_sm_legit_hash=$(python3 -c "print('e' * 64)")
+cat > "$_sm_compdir/artifacts.lock.json" <<JSON
+{
+  "version": "1.2.3",
+  "artifacts": [
+    { "filename": "$_sm_comp_tarball", "kind": "go-helper", "architecture": "amd64", "sha256": "$_sm_legit_hash" }
+  ]
+}
+JSON
+
+if sm_verify_checksum "$_sm_compdir/$_sm_comp_tarball" "$_sm_compdir/SHA256SUMS" "$_sm_comp_tarball"; then
+    pass "the compromised pair is self-consistent (the attack surface a manifest-only check cannot see)"
+else
+    fail "the compromised pair is self-consistent (the attack surface a manifest-only check cannot see)" "test setup is wrong: the downloaded manifest and tarball should agree with each other"
+fi
+
+_sm_comp_expected=$(sm_lock_expected_sha256 "$_sm_compdir" "1.2.3" "$_sm_comp_tarball")
+if sm_verify_sha256 "$_sm_compdir/$_sm_comp_tarball" "$_sm_comp_expected"; then
+    fail "the compromised host's self-consistent pair is rejected by the lock-anchored check" "sm_verify_sha256 accepted a tarball the committed lock disagrees with"
+else
+    pass "the compromised host's self-consistent pair is rejected by the lock-anchored check"
+fi
+
+# ---------------------------------------------------------------------------
 # Command script validation
 # ---------------------------------------------------------------------------
 
@@ -507,6 +602,117 @@ status=$?
 assert_failure "verifying the mode of a nonexistent path fails rather than silently passing" "$status"
 
 # ---------------------------------------------------------------------------
+# Stage-then-swap binary activation, with rollback
+# ---------------------------------------------------------------------------
+
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/activate.sh"
+
+echo "== stage-then-swap activation =="
+
+# No "fpp" system user exists on the machine running this suite (see
+# README.md's "what has not been verified" section), so sm_stage_binary's
+# chown would fail loudly here even on a healthy stage. Point it at the
+# current user instead so these tests exercise a real, successful chown
+# rather than skipping ownership entirely; production code never sets
+# this and always targets fpp:fpp.
+SM_INSTALL_OWNER="$(id -un):$(id -gn)"
+export SM_INSTALL_OWNER
+
+_sm_actdir="$_sm_tmp/activate"
+mkdir -p "$_sm_actdir"
+
+# Fresh install: no previous binary at all. Stage then activate, and
+# confirm nothing but the final target is left behind.
+_sm_act_target="$_sm_actdir/fresh-plugin"
+_sm_act_staging="$_sm_act_target.staging"
+printf 'new binary content\n' > "$_sm_tmp/act-fresh-source"
+if sm_stage_binary "$_sm_tmp/act-fresh-source" "$_sm_act_staging" \
+    && sm_activate_binary "$_sm_act_staging" "$_sm_act_target"; then
+    pass "a fresh install with no previous binary stages and activates cleanly"
+else
+    fail "a fresh install with no previous binary stages and activates cleanly" "unexpected failure"
+fi
+assert_eq "the activated binary is executable (mode 0755)" "755" "$(sm_current_mode "$_sm_act_target")"
+assert_eq "no staging file is left behind after a successful activation" "" "$( [ -e "$_sm_act_staging" ] && echo present )"
+assert_eq "no backup file is left behind after a successful fresh activation" "" "$( [ -e "$_sm_act_target.previous" ] && echo present )"
+
+# Upgrade: a previous binary exists, activation succeeds, the previous
+# binary's backup is cleaned up, and the new content is what is live.
+_sm_act_target2="$_sm_actdir/upgrade-plugin"
+printf 'old binary content\n' > "$_sm_act_target2"
+chmod 0755 "$_sm_act_target2"
+_sm_act_staging2="$_sm_act_target2.staging"
+printf 'new binary content v2\n' > "$_sm_tmp/act-upgrade-source"
+sm_stage_binary "$_sm_tmp/act-upgrade-source" "$_sm_act_staging2" \
+    || fail "staging succeeds ahead of the upgrade-activation test" "sm_stage_binary itself failed; see stderr above"
+if sm_activate_binary "$_sm_act_staging2" "$_sm_act_target2"; then
+    pass "an upgrade over an existing binary activates cleanly"
+else
+    fail "an upgrade over an existing binary activates cleanly" "unexpected failure"
+fi
+assert_eq "the upgraded target now serves the new content" "new binary content v2" "$(cat "$_sm_act_target2")"
+assert_eq "no backup file is left behind after a successful upgrade activation" "" "$( [ -e "$_sm_act_target2.previous" ] && echo present )"
+
+# Failure during post-staging validation: shadow sm_verify_mode (the same
+# technique arch.sh's tests use on sm_uname_m) to force staging's mode
+# check to fail. The previous binary must survive untouched and
+# executable, and the staging file must be discarded.
+_sm_act_target3="$_sm_actdir/validation-failure-plugin"
+printf 'previous binary, must survive\n' > "$_sm_act_target3"
+chmod 0755 "$_sm_act_target3"
+_sm_act_staging3="$_sm_act_target3.staging"
+printf 'new binary that never gets validated\n' > "$_sm_tmp/act-badvalidation-source"
+sm_verify_mode() { sm_log_err "test-injected mode verification failure"; return 1; }
+out=$(sm_stage_binary "$_sm_tmp/act-badvalidation-source" "$_sm_act_staging3" 2>&1)
+status=$?
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/common.sh"
+assert_failure "a failure injected during post-staging mode validation is rejected" "$status"
+assert_eq "the previous binary survives a post-staging validation failure" "previous binary, must survive" "$(cat "$_sm_act_target3")"
+if [ -x "$_sm_act_target3" ]; then
+    pass "the previous binary remains executable after a post-staging validation failure"
+else
+    fail "the previous binary remains executable after a post-staging validation failure" "lost its executable bit"
+fi
+assert_eq "the staging file is removed after a post-staging validation failure" "" "$( [ -e "$_sm_act_staging3" ] && echo present )"
+
+# Failure in the swap itself, after staging already succeeded: shadow
+# sm_atomic_rename to fail only on its second call within activation (the
+# staging-to-target swap), leaving its first call (backing up the
+# previous binary) to succeed normally. The previous binary must be
+# rolled back into place.
+_sm_act_target4="$_sm_actdir/swap-failure-plugin"
+printf 'previous binary, must be restored\n' > "$_sm_act_target4"
+chmod 0755 "$_sm_act_target4"
+_sm_act_staging4="$_sm_act_target4.staging"
+printf 'new binary that never goes live\n' > "$_sm_tmp/act-badswap-source"
+sm_stage_binary "$_sm_tmp/act-badswap-source" "$_sm_act_staging4" \
+    || fail "staging succeeds ahead of the swap-failure test" "sm_stage_binary itself failed; see stderr above"
+_sm_rename_call_count=0
+sm_atomic_rename() {
+    _sm_rename_call_count=$((_sm_rename_call_count + 1))
+    if [ "$_sm_rename_call_count" -eq 2 ]; then
+        return 1
+    fi
+    mv -f "$1" "$2"
+}
+out=$(sm_activate_binary "$_sm_act_staging4" "$_sm_act_target4" 2>&1)
+status=$?
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/activate.sh"
+unset _sm_rename_call_count
+assert_failure "a failure injected in the swap itself, after staging succeeded, is rejected" "$status"
+assert_eq "the previous binary is rolled back into place after a failed swap" "previous binary, must be restored" "$(cat "$_sm_act_target4")"
+if [ -x "$_sm_act_target4" ]; then
+    pass "the rolled-back previous binary remains executable"
+else
+    fail "the rolled-back previous binary remains executable" "lost its executable bit"
+fi
+assert_contains "the failure message names the rollback" "$out" "rolled back"
+assert_eq "the staging file is removed after a failed swap" "" "$( [ -e "$_sm_act_staging4" ] && echo present )"
+
+# ---------------------------------------------------------------------------
 # Repository hygiene: the executable bits everything else depends on
 # ---------------------------------------------------------------------------
 #
@@ -542,11 +748,16 @@ else
         scripts/lib/fetch.sh \
         scripts/lib/verify.sh \
         scripts/lib/commands.sh \
+        scripts/lib/lock.sh \
+        scripts/lib/activate.sh \
         scripts/lib/install-core.sh
     do
         _sm_recorded_mode=$(cd "$_sm_repo_dir" && "$_sm_git" ls-files -s -- "$_sm_libfile" 2>/dev/null | awk '{print $1}')
         assert_eq "$_sm_libfile is committed non-executable (100644, it is only ever sourced)" "100644" "$_sm_recorded_mode"
     done
+
+    _sm_recorded_mode=$(cd "$_sm_repo_dir" && "$_sm_git" ls-files -s -- artifacts.lock.json 2>/dev/null | awk '{print $1}')
+    assert_eq "artifacts.lock.json is committed non-executable (100644, it is data, not a script)" "100644" "$_sm_recorded_mode"
 fi
 
 # ---------------------------------------------------------------------------

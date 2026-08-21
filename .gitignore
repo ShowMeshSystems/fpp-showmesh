@@ -10,4 +10,6 @@
 # untracked binary sitting in a git working tree with no matching
 # .gitignore entry is exactly what that command is aimed at.
 /showmesh-fpp-plugin
+/showmesh-fpp-plugin.staging
+/showmesh-fpp-plugin.previous
 /.installed-arch

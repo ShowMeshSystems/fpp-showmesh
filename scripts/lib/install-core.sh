@@ -9,8 +9,8 @@
 # (not just sm_install_binary), so that a repair re-scaffolds permissions
 # too, not only the binary.
 #
-# Requires common.sh, arch.sh, fetch.sh, verify.sh, and commands.sh to
-# already be sourced.
+# Requires common.sh, arch.sh, fetch.sh, verify.sh, commands.sh, lock.sh,
+# and activate.sh to already be sourced.
 
 # Creates the plugin's credential directory/file and non-secret state
 # directory/files, without overwriting anything that already exists. This
@@ -126,9 +126,19 @@ sm_ensure_config_scaffold() {
 # Fetches, verifies, and installs the binary for this host's architecture.
 # Always re-fetches: called on both install and upgrade, and a version bump
 # is exactly the case where the previously installed binary must not be kept.
+#
+# Verification is against this repository's own committed
+# artifacts.lock.json (see lib/lock.sh), not against a checksum manifest
+# fetched from the same host as the tarball; see verify.sh's header for
+# why that distinction matters. Activation is stage-then-swap (see
+# lib/activate.sh): the new binary is fully staged and validated before
+# anything at the live target path is touched, and the previous binary is
+# preserved until the atomic rename that activates the new one is known
+# to have succeeded.
 sm_install_binary() {
-    local _sm_plugin_dir _sm_fppdir _sm_version _sm_arch _sm_tarball_name _sm_sums_name
-    local _sm_base_url _sm_mktemp _sm_workdir _sm_rm _sm_tar _sm_mv _sm_chmod _sm_chown _sm_target
+    local _sm_plugin_dir _sm_fppdir _sm_version _sm_arch _sm_tarball_name
+    local _sm_base_url _sm_expected_hash _sm_mktemp _sm_workdir _sm_rm _sm_tar
+    local _sm_target _sm_staging
     _sm_plugin_dir="$1"
     _sm_fppdir="$2"
     _sm_version="$3"
@@ -140,9 +150,17 @@ sm_install_binary() {
     sm_log "detected architecture: $_sm_arch"
 
     _sm_tarball_name=$(sm_artifact_tarball_name "$_sm_version" "$_sm_arch")
-    _sm_sums_name=$(sm_artifact_sums_name "$_sm_version")
     _sm_base_url=$(sm_artifact_base_url "$_sm_version")
     sm_check_base_url_scheme "$_sm_base_url" || return 1
+
+    # Resolved before any network access: a missing, malformed, or
+    # version-mismatched lock refuses the install outright rather than
+    # fetching bytes when there is nothing trustworthy to check them
+    # against.
+    _sm_expected_hash=$(sm_lock_expected_sha256 "$_sm_plugin_dir" "$_sm_version" "$_sm_tarball_name") || {
+        sm_log_err "refusing to install without a matching artifacts.lock.json entry for $_sm_tarball_name"
+        return 1
+    }
 
     _sm_mktemp=$(sm_resolve_bin mktemp /bin/mktemp /usr/bin/mktemp) || return 1
     _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
@@ -161,13 +179,9 @@ sm_install_binary() {
         "$_sm_rm" -rf "$_sm_workdir"
         return 1
     fi
-    if ! sm_download "$_sm_base_url/$_sm_sums_name" "$_sm_workdir/$_sm_sums_name"; then
-        "$_sm_rm" -rf "$_sm_workdir"
-        return 1
-    fi
 
-    if ! sm_verify_checksum "$_sm_workdir/$_sm_tarball_name" "$_sm_workdir/$_sm_sums_name" "$_sm_tarball_name"; then
-        sm_log_err "refusing to install an artifact that failed checksum verification"
+    if ! sm_verify_sha256 "$_sm_workdir/$_sm_tarball_name" "$_sm_expected_hash"; then
+        sm_log_err "refusing to install an artifact that failed checksum verification against artifacts.lock.json"
         "$_sm_rm" -rf "$_sm_workdir"
         return 1
     fi
@@ -188,37 +202,26 @@ sm_install_binary() {
         return 1
     fi
 
-    _sm_mv=$(sm_resolve_bin mv /bin/mv /usr/bin/mv) || {
-        "$_sm_rm" -rf "$_sm_workdir"
-        return 1
-    }
-    _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || {
-        "$_sm_rm" -rf "$_sm_workdir"
-        return 1
-    }
-    _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || {
-        "$_sm_rm" -rf "$_sm_workdir"
-        return 1
-    }
-
     _sm_target=$(sm_binary_path "$_sm_plugin_dir")
-    if ! "$_sm_mv" -f "$_sm_workdir/showmesh-fpp-plugin" "$_sm_target"; then
-        sm_log_err "could not install binary to $_sm_target"
+    # Staged in the same directory as the final target, deliberately: see
+    # lib/activate.sh's header for why that is what makes the final
+    # activation rename atomic.
+    _sm_staging="$_sm_target.staging"
+
+    if ! sm_stage_binary "$_sm_workdir/showmesh-fpp-plugin" "$_sm_staging"; then
         "$_sm_rm" -rf "$_sm_workdir"
         return 1
     fi
     "$_sm_rm" -rf "$_sm_workdir"
 
-    if ! "$_sm_chmod" 0755 "$_sm_target"; then
-        sm_log_err "could not set permissions on $_sm_target"
+    if ! sm_activate_binary "$_sm_staging" "$_sm_target"; then
         return 1
     fi
-    sm_verify_mode "$_sm_target" 755 || return 1
 
-    if ! "$_sm_chown" fpp:fpp "$_sm_target"; then
-        sm_log_err "could not set ownership of $_sm_target to fpp:fpp"
-        return 1
-    fi
+    # Cheap re-confirmation that the rename actually landed a 0755 binary
+    # at the target, in the same spirit as every other mode check in this
+    # repository trusting a readback over an exit code alone.
+    sm_verify_mode "$_sm_target" 755 || return 1
 
     # See sm_arch_stamp_path's comment: this is what lets preStart.sh
     # catch a cloned-image, wrong-architecture binary that an [ -x ] check

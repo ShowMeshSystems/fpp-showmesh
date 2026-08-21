@@ -6,18 +6,25 @@
 # listing in FPP's plugin registry, and clearing it is what this file is
 # for.
 #
-# Be precise about what this buys and what it does not. The tarball and
-# its checksum manifest are fetched from the same base URL (see
-# sm_artifact_base_url in fetch.sh), there is no digest pinned anywhere in
-# this repository independent of that fetch, and no second origin cross-
-# checks either file. So this is NOT a defense against a compromised or
-# redirected host serving a consistent, self-signed pair of bad bytes and
-# a matching bad manifest — a host controlling both files can make them
-# agree with each other regardless of what they actually contain. What it
-# genuinely catches is transport corruption and a tampered-in-transit
-# tarball that no longer matches a manifest fetched (and trusted) as a
-# separate step, which is exactly the registry finding it clears and no
-# more than that.
+# sm_verify_checksum below verifies a tarball against a checksum manifest
+# also fetched over the network. Be precise about what that buys and what
+# it does not: the tarball and its checksum manifest are fetched from the
+# same base URL (see sm_artifact_base_url in fetch.sh), there is no digest
+# pinned anywhere in this repository independent of that fetch, and no
+# second origin cross-checks either file. So it is NOT a defense against a
+# compromised or redirected host serving a consistent, self-signed pair of
+# bad bytes and a matching bad manifest — a host controlling both files
+# can make them agree with each other regardless of what they actually
+# contain. What it genuinely catches is transport corruption and a
+# tampered-in-transit tarball that no longer matches a manifest fetched
+# (and trusted) as a separate step.
+#
+# That same-origin gap is exactly why sm_install_binary does not use
+# sm_verify_checksum as its actual trust gate. It instead verifies with
+# sm_verify_sha256 below, against a hash sourced from this repository's
+# own committed artifacts.lock.json (see lib/lock.sh) rather than from
+# anything fetched over curl. sm_verify_checksum stays here because it is
+# still a real, useful check, just not a sufficient one on its own.
 #
 # Requires scripts/lib/common.sh to already be sourced.
 
@@ -72,6 +79,35 @@ sm_verify_checksum() {
 
     if [ "$_sm_actual_hash" != "$_sm_expected_hash" ]; then
         sm_log_err "checksum mismatch for $_sm_expected_name: expected $_sm_expected_hash, got $_sm_actual_hash"
+        return 1
+    fi
+
+    return 0
+}
+
+# Computes the actual sha256 of $1 (a downloaded file) and compares it to
+# $2, an already-trusted expected hash. Unlike sm_verify_checksum above,
+# this never reads a manifest fetched from the same host as the file it is
+# checking; the expected hash must arrive from a source a compromised
+# download host cannot also control: this repository's own
+# artifacts.lock.json (see lib/lock.sh), not a downloaded SHA256SUMS.
+sm_verify_sha256() {
+    local _sm_path _sm_expected _sm_sha256sum _sm_awk _sm_actual
+    _sm_path="$1"
+    _sm_expected="$2"
+
+    if [ ! -f "$_sm_path" ]; then
+        sm_log_err "file not found to verify: $_sm_path"
+        return 1
+    fi
+
+    _sm_sha256sum=$(sm_resolve_bin sha256sum /usr/bin/sha256sum /bin/sha256sum /sbin/sha256sum) || return 1
+    _sm_awk=$(sm_resolve_bin awk /usr/bin/awk /bin/awk) || return 1
+
+    _sm_actual=$("$_sm_sha256sum" "$_sm_path" | "$_sm_awk" '{print $1}')
+
+    if [ "$_sm_actual" != "$_sm_expected" ]; then
+        sm_log_err "checksum mismatch for $_sm_path: expected $_sm_expected (from artifacts.lock.json), got $_sm_actual"
         return 1
     fi
 
