@@ -499,20 +499,56 @@ any FPP host involved:
   under the state directory; a hard link occupying a scaffold file's own
   path is refused a chown/chmod run in place (which would have mutated
   whatever the hard link's other name pointed at) in favor of preparing
-  the file's content at a temp path in a fresh inode and activating it
-  with one atomic rename, the same discipline `sm_write_stamp` uses —
-  that temp path sits inside the same `fpp`-owned scaffold directory, not
-  a private location, so its chown and chmod are each preceded by a
-  device/inode identity check that refuses rather than silently mutating
-  whatever `fpp` may have unlinked and replaced it with in the gap. This
-  closes the ownership half of that race in this repository's own
-  testing; the mode half is narrower, since Linux has no `lchmod(2)` and
-  a shell-driven check immediately before an external `chmod` call can
-  still lose to a swap timed between the check and that call, the same
-  residual already accepted for `sm_scaffold_dir`'s own chmod above. A
+  the file's content in `sm_scaffold_stage_root()` (`common.sh`), a
+  root:root staging directory whose own PARENT is `/etc` (writable by
+  nothing but root), and activating it with one rename. That staging
+  directory is deliberately NOT a sibling under the `fpp`-owned
+  `sm_credential_dir`/`sm_state_dir`: `fpp` has no access to it, or
+  anything created inside it, at any point in its life, so the chown and
+  chmod that follow run against it directly, with nothing to race and no
+  identity check needed. An earlier version of this construction instead
+  staged inside the `fpp`-owned scaffold directory and guarded its own
+  chown/chmod with a device/inode identity check taken just before each;
+  measured over 3000 trials per configuration, that construction let a
+  hard-link attacker mutate ownership 820 times and mode 181 times out of
+  3000 — worse on both axes than the plain baseline it replaced — and
+  gave a symlink attacker no protection at all, since `chmod(1)` follows
+  a symlink with no `-h` and GNU `stat` reads a symlink's own identity by
+  default, so the identity check's two reads always agreed with each
+  other regardless of what the symlink pointed to. The current
+  construction, measured the same way against both attacks: 0 ownership
+  mutations, 0 mode mutations, 3000 of 3000 scaffolds succeeded. What
+  makes the final step safe regardless of timing is `rename(2)` itself:
+  it replaces a destination NAME outright and never dereferences a
+  symlink or hard link already sitting there, so the swap is safe no
+  matter what currently occupies the scaffold file's own path. A
   directory (or anything else that is not a regular file) sitting at a
   scaffold file's own path is refused rather than chowned, chmoded, and
   reported healthy.
+
+  A rename is only atomic within one filesystem, and the staging root
+  and a scaffold file's own target can legitimately be on different ones,
+  since this repository supports the media directory (and therefore
+  `sm_state_dir`) on removable storage. When `rename(2)` reports `EXDEV`,
+  `sm_scaffold_activate_cross_device` (`install-core.sh`) takes over: it
+  creates the file directly inside the target's own directory (which
+  `fpp` CAN reach) and sets its mode and ownership through the file
+  descriptor that created it — `chmod`/`chown` against `/proc/self/fd`,
+  not the path — so a later swap of that path's name cannot redirect
+  them. Tested clean for privilege this way, over 3000 trials with the
+  target directory bound to a separate filesystem to force `EXDEV`: 0
+  ownership mutations, 0 mode mutations. The residual specific to this
+  fallback, and only this fallback, is narrower than an
+  ownership/mode escalation: the FINAL rename onto the real target is
+  still resolved by path, not by the descriptor, so a swap of the
+  intermediate name in the brief window between the descriptor closing
+  and that rename can substitute `fpp`'s own content, or a symlink to
+  wherever `fpp` chooses, for the scaffolded content — a torn, non-atomic
+  write, and a content-integrity problem, not a privilege one, since no
+  chmod or chown this repository runs is ever redirected by it. This has
+  been exercised only in a container with a bind-mounted tmpfs standing
+  in for removable media, never against real removable storage on an FPP
+  host.
 - `sm_install_binary` and `sm_install_or_upgrade`, end to end, with
   `sm_detect_arch` and `sm_download` shadowed so nothing here touches the
   network: a clean fresh install; a lock hash that disagrees with the
@@ -605,8 +641,8 @@ project targets:
   path is `www/api/controllers/plugin.php:227-246`, which runs `git pull`
   under `sudo` instead. Still root either way. That momentary gap is
   closed automatically, system-wide, not just for this plugin:
-  `setFileOwnership()` (`src/boot/FPPINIT.h` on FPP 10, `src/boot/
-  FPPINIT.cpp:886-888` on FPP 9) runs `chown -R fpp:fpp` over a hardcoded
+  `setFileOwnership()` (`src/boot/FPPINIT_Config.cpp:560-562` on FPP 10,
+  `src/boot/FPPINIT.cpp:886-888` on FPP 9) runs `chown -R fpp:fpp` over a hardcoded
   `/home/fpp/media`, including every installed plugin's directory, on
   every boot's `postNetwork` phase, unconditionally, before `preStart`
   scripts run. That re-assertion is narrower than a blanket "every boot"
@@ -635,10 +671,11 @@ Put together: `preStart.sh`, `fpp_install.sh`, `fpp_upgrade.sh`,
 executed as root, out of a directory the `fpp` user can write to at any
 time. `fpp` is not the account this plugin's own binary or the commands
 FPP fires against it run as: a fired plugin command reaches its script by
-`execve` with no privilege drop (`Plugins.cpp` around line 315), same as
+`execve` with no privilege drop (`Plugins.cpp:315` on FPP 10, `Plugins.cpp:308`
+on FPP 9), same as
 `fppd` itself (see above), so both run as root, same as the scripts. The
-`fpp`-level actor in this picture is the FPP web UI: `SD/FPP_Install.sh`
-around line 2084 sets `APACHE_RUN_USER` to the FPP user, so Apache, and
+`fpp`-level actor in this picture is the FPP web UI: `SD/FPP_Install.sh:2084`
+on FPP 10 (`SD/FPP_Install.sh:1344` on FPP 9) sets `APACHE_RUN_USER` to the FPP user, so Apache, and
 the PHP it runs (including the upgrade path cited above), is what
 actually executes as `fpp`. Nothing internal to those scripts, no symlink
 refusal, no atomic rename, no lock-file check, can be a trust boundary

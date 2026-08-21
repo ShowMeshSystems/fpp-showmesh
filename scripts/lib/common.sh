@@ -189,26 +189,22 @@ sm_current_mode() {
     printf '%s\n' "$_sm_result"
 }
 
-# Prints "device:inode" for path $1, trying GNU stat's format first and
-# falling back to BSD/macOS stat's, the same two-format pattern
-# sm_current_mode uses. Prints nothing and returns non-zero if the path
-# cannot be stat'd. Two reads of this a mutating call apart, compared for
-# equality, is how sm_scaffold_file confirms the object it is about to
-# chmod is still the exact inode it created rather than something
-# unlinked and replaced in the gap: a symlink swap changes this even
-# though `-L` already refused it, and, unlike a symlink check, a plain
-# regular-file swap (unlink, then a fresh file created at the same name)
-# changes it too, which no symlink check can see at all.
-sm_dev_inode() {
-    local _sm_stat _sm_path _sm_result
-    _sm_path="$1"
-    _sm_stat=$(sm_resolve_bin stat /usr/bin/stat /bin/stat) || return 1
-    _sm_result=$("$_sm_stat" -c '%d:%i' "$_sm_path" 2>/dev/null) || \
-        _sm_result=$("$_sm_stat" -f '%d:%i' "$_sm_path" 2>/dev/null)
-    if [ -z "$_sm_result" ]; then
-        return 1
-    fi
-    printf '%s\n' "$_sm_result"
+# Root-controlled staging directory sm_scaffold_file (install-core.sh)
+# stages every credential/state file in before it is ever given a name
+# inside sm_credential_dir or sm_state_dir. Deliberately NOT a sibling
+# under either of those: both are chowned to fpp:fpp so the plugin's own
+# binary can use them, so a staging subdirectory nested inside one of
+# them would have an "fpp"-OWNED parent, and unlinking or renaming a
+# directory entry needs write permission on the PARENT, not the child —
+# "fpp" could replace a staging directory wholesale regardless of its own
+# 0700 mode. This path's parent is /etc, which nothing but root can ever
+# write into, so nothing but root can ever replace it. Overridable via
+# SM_SCAFFOLD_STAGE_ROOT (the same override pattern SM_INSTALL_OWNER
+# uses) so this repository's own tests can point it at a tmp directory
+# the unprivileged user running the suite actually controls; production
+# code never sets it.
+sm_scaffold_stage_root() {
+    printf '%s\n' "${SM_SCAFFOLD_STAGE_ROOT:-/etc/showmesh-fpp-plugin.stage}"
 }
 
 # Confirms a chmod actually took effect, rather than trusting its exit
@@ -228,7 +224,7 @@ sm_verify_mode() {
         return 1
     }
     if [ "$_sm_actual" != "$_sm_expected" ]; then
-        sm_log_err "mode verification failed for $_sm_path: requested $_sm_expected, filesystem reports $_sm_actual (a vfat/exFAT mount silently ignoring chmod, because it derives modes from mount options, produces exactly this mismatch)"
+        sm_log_err "mode verification failed for $_sm_path: requested $_sm_expected, filesystem reports $_sm_actual (a vfat/exFAT mount silently ignoring chmod, because it derives modes from mount options, produces exactly this mismatch; so does $_sm_path having been swapped for a different object, such as a symlink, since it was created — this check alone cannot tell those two causes apart)"
         return 1
     fi
     return 0
@@ -335,4 +331,28 @@ sm_mkdir_p_refuse_symlinks() {
         fi
     done
     return 0
+}
+
+# Ensures sm_scaffold_stage_root() exists, mode 0700, and is never chowned
+# to fpp:fpp. This deliberately does NOT use sm_scaffold_dir: that
+# function's whole job is to hand a directory over to fpp:fpp, which is
+# exactly what this directory must never be. Every path component is
+# walked and refused-if-symlink by sm_mkdir_p_refuse_symlinks first, the
+# same defence sm_scaffold_dir itself relies on, then the leaf is
+# re-checked and chmoded. There is no chown here at all: whoever creates
+# this directory (root, on every real install/upgrade/repair) is already
+# the only owner it will ever have.
+sm_ensure_scaffold_stage_dir() {
+    local _sm_dir _sm_chmod
+    _sm_dir=$(sm_scaffold_stage_root)
+    _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
+
+    sm_refuse_symlink "$_sm_dir" || return 1
+    sm_mkdir_p_refuse_symlinks "$_sm_dir" || return 1
+    sm_refuse_symlink "$_sm_dir" || return 1
+    "$_sm_chmod" 0700 "$_sm_dir" || {
+        sm_log_err "could not set permissions on staging directory $_sm_dir"
+        return 1
+    }
+    sm_verify_mode "$_sm_dir" 700
 }

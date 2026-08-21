@@ -1480,6 +1480,13 @@ echo "== sm_ensure_config_scaffold (symlink refusal) =="
 _sm_scafdir="$_sm_tmp/scaffold"
 mkdir -p "$_sm_scafdir"
 
+# sm_scaffold_file's staging root defaults to /etc/showmesh-fpp-plugin.stage,
+# which this suite's unprivileged user cannot create. Point it at a tmp
+# directory the suite itself controls instead; production code never sets
+# this and gets the real, root-controlled path.
+SM_SCAFFOLD_STAGE_ROOT="$_sm_scafdir/stage-root"
+export SM_SCAFFOLD_STAGE_ROOT
+
 # --- a symlinked directory target must be refused, not followed. ---
 _sm_scaf_creddir_target="$_sm_scafdir/creddir-real-target"
 mkdir -p "$_sm_scaf_creddir_target"
@@ -2144,28 +2151,40 @@ _sm_hygiene_bare_hits() {
     #   1. A bare invocation in COMMAND POSITION: the tool name directly
     #      after a command separator (start of line, `;`, `&`, `|`, `(`,
     #      `)` as a case-arm pattern's own close, `{` opening an inline
-    #      group, a backtick, `$(`, or the shell keywords
-    #      `then`/`do`/`else`/`elif`), optionally quoted. Prose that
-    #      merely mentions a tool's name mid-sentence ("...ignoring
-    #      chmod...", "...from uname -m...") is never preceded by any of
-    #      those, so it never matches this shape, with no need to
-    #      special-case which function's message the prose happens to
-    #      sit inside (the previous version's exclusion for lines
-    #      starting with sm_log_err/sm_log/printf was too broad for
-    #      exactly this reason: it also hid a real bare invocation
-    #      embedded inside such a line's own $(...).) An earlier version
-    #      of this class omitted the shell keywords and the case/brace
-    #      delimiters, so a bare call right after `then`, `do`, `{`, or a
-    #      case pattern's `)` all shared a line with none of the original
-    #      delimiters and went uncaught.
-    #   2. A bare ASSIGNMENT: VAR=tool with no resolution in between.
+    #      group, a backtick, `!`, a leading redirection with no target
+    #      word of its own (`>&2 tool`, `2>&1 tool`, `<&0 tool`), `$(`,
+    #      one or more leading `VAR=value` environment assignments
+    #      (`LC_ALL=C tool`), or the shell keywords `then`/`do`/`else`/
+    #      `elif`/`if`/`while`/`until`/`time`/`command`/`exec`/`eval`/
+    #      `sudo`/`xargs`), optionally quoted. Prose that merely mentions
+    #      a tool's name mid-sentence ("...ignoring chmod...", "...from
+    #      uname -m...") is never preceded by any of those, so it never
+    #      matches this shape, with no need to special-case which
+    #      function's message the prose happens to sit inside (the
+    #      previous version's exclusion for lines starting with
+    #      sm_log_err/sm_log/printf was too broad for exactly this
+    #      reason: it also hid a real bare invocation embedded inside
+    #      such a line's own $(...).) An earlier version of this class
+    #      omitted the shell keywords and the case/brace delimiters, so a
+    #      bare call right after `then`, `do`, `{`, or a case pattern's
+    #      `)` all shared a line with none of the original delimiters and
+    #      went uncaught; a later version still missed the backtick
+    #      itself, `!`, `if`/`while`/`until`/`time`/`command`/`exec`/
+    #      `eval`/`sudo`/`xargs`, a leading redirection, and a leading
+    #      env-var assignment.
+    #   2. A bare ASSIGNMENT: VAR=tool with no resolution in between,
+    #      optionally preceded by `local`, `export`, or `readonly`.
     #      "_sm_rm=rm" is exactly as unresolved as calling `rm` directly
     #      the moment "$_sm_rm" is later invoked; a plain character-class
     #      match that excluded anything preceded by "=" (the previous
     #      version's) whitelisted this shape by construction instead of
-    #      catching it.
+    #      catching it. "local _sm_rm=rm" is the single most likely
+    #      accidental shape in this tree, since nearly every function
+    #      here opens a block of `local` declarations, and an earlier
+    #      version of this class did not recognize `local`/`export`/
+    #      `readonly` as a prefix to that same shape.
     printf '%s\n' "$_sm_hbh_scrubbed" | grep -n -E \
-        "(^|[;&|(){]|\\\$\\(|(^|[[:space:];&|])(then|do|else|elif)[[:space:]])[[:space:]]*[\"']?${_sm_hbh_tool}([^A-Za-z0-9_]|\$)|(^|[;&|(){]|(^|[[:space:];&|])(then|do|else|elif)[[:space:]])[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=${_sm_hbh_tool}([^A-Za-z0-9_]|\$)" \
+        "(^|[;&|(){\`!]|[0-9]*(>{1,2}|<)&?[0-9]*|\\\$\\(|(^|[[:space:];&|])(then|do|else|elif|if|while|until|time|command|exec|eval|sudo|xargs)[[:space:]]|(^|[;&|(){])([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)+)[[:space:]]*[\"']?${_sm_hbh_tool}([^A-Za-z0-9_]|\$)|(^|[;&|(){]|(^|[[:space:];&|])(then|do|else|elif|if|while|until|local|export|readonly)[[:space:]])[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=${_sm_hbh_tool}([^A-Za-z0-9_]|\$)" \
         | grep -v -E '^[0-9]+:[[:space:]]*#'
 }
 
@@ -2224,6 +2243,18 @@ _sm_hygiene_case "after 'then'" 'if [ -f x ]; then chmod x; fi' chmod
 _sm_hygiene_case "after 'do'" 'for f in x; do chmod "$f"; done' chmod
 _sm_hygiene_case "inside { ... }" '{ chmod x; }' chmod
 _sm_hygiene_case "after a case pattern" 'case "$x" in *) chmod x ;; esac' chmod
+_sm_hygiene_case "backtick command substitution" 'x=`chmod y`' chmod
+_sm_hygiene_case "negated with '!'" '! chmod x' chmod
+_sm_hygiene_case "'if tool; then'" 'if chmod x; then :; fi' chmod
+_sm_hygiene_case "'while'" 'while chmod x; do :; done' chmod
+_sm_hygiene_case "'until'" 'until chmod x; do :; done' chmod
+_sm_hygiene_case "'time'" 'time chmod x' chmod
+_sm_hygiene_case "'command'" 'command chmod x' chmod
+_sm_hygiene_case "'exec'" 'exec chmod x' chmod
+_sm_hygiene_case "'eval'" 'eval chmod x' chmod
+_sm_hygiene_case "'sudo'" 'sudo chmod x' chmod
+_sm_hygiene_case "'xargs'" 'echo x | xargs chmod' chmod
+_sm_hygiene_case "a leading redirection" '>&2 chmod x' chmod
 
 # The sed scrub must not delete a bare call nested inside what looks like
 # a resolver argument list (a command substitution used as one of the
@@ -2233,6 +2264,18 @@ _sm_hygiene_case "after a case pattern" 'case "$x" in *) chmod x ;; esac' chmod
 # leaves it standing rather than deleting it along with the outer
 # sm_resolve_bin call it appears to belong to.
 _sm_hygiene_case "nested inside a resolver argument list" '_sm_x=$(sm_resolve_bin chmod "$(rm -f x)")' rm
+
+# --- self-test: the bare-ASSIGNMENT class ("VAR=tool"), the other half
+# of _sm_hygiene_bare_hits. Every fixture above only ever plants a bare
+# call in COMMAND position; reverting the assignment class to its old,
+# narrower character-class-only form left the suite fully green with none
+# of these run, so each of these is what actually exercises that half of
+# the guard. ---
+_sm_hygiene_case "bare assignment 'VAR=tool'" '_sm_rm=rm' rm
+_sm_hygiene_case "'local VAR=tool'" 'local _sm_rm=rm' rm
+_sm_hygiene_case "'export VAR=tool'" 'export _sm_rm=rm' rm
+_sm_hygiene_case "'readonly VAR=tool'" 'readonly _sm_rm=rm' rm
+_sm_hygiene_case "a leading 'LC_ALL=C'" 'LC_ALL=C chmod x' chmod
 
 unset -f _sm_hygiene_case
 unset _sm_hc_file _sm_hc_hits

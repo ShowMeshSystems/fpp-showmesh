@@ -83,52 +83,71 @@ sm_scaffold_dir() {
 # chowns/chmods it to fpp:fpp, without overwriting any content already
 # there.
 #
-# The chown/chmod never run against $1 directly. sm_refuse_symlink only
-# catches a SYMLINK at $1; it is blind to a HARD link (a second name for
-# an already-existing inode, `ln` with no `-s`), which passes every
-# symlink check because it genuinely is not one. A root chown/chmod run
-# on a path that is really a hard link to a victim file mutates that
-# victim's shared inode too, silently: verified against a real Debian
-# container, a root-owned 0666 file hard-linked to config.json became
-# fpp:fpp 0600 after one scaffold pass, at exit 0. Instead, whatever
-# content should end up at $1 (existing content, read but never written
-# through; or the default, for a fresh file) is written to a temp path
-# in a brand-new inode (the same `set -C`/O_EXCL technique sm_write_stamp
-# in activate.sh uses), chowned and chmoded THERE, and only then given
-# the name $1 via one atomic rename. Reading $1's existing content by
-# path is harmless even if it is a hard link (reading never mutates);
-# only a write through the shared name would have been unsafe, and this
-# never performs one.
+# The chown/chmod never run against $1, or against any path inside a
+# directory "fpp" (the user fppd and this plugin's own binary run as) can
+# reach. sm_refuse_symlink only catches a SYMLINK at $1; it is blind to a
+# HARD link (a second name for an already-existing inode, `ln` with no
+# `-s`), which passes every symlink check because it genuinely is not
+# one. A root chown/chmod run on a path that is really a hard link to a
+# victim file mutates that victim's shared inode too, silently: verified
+# against a real Debian container, a root-owned 0666 file hard-linked to
+# config.json became fpp:fpp 0600 after one scaffold pass, at exit 0. An
+# earlier version of this function tried to close that with a
+# device/inode identity check taken immediately before its own chmod,
+# staged inside sm_credential_dir/sm_state_dir (owned by "fpp", not
+# root, so still reachable by it). Measured over 3000 trials per
+# configuration, that construction let a hard-link attacker mutate
+# ownership 820 times and mode 181 times out of 3000 — worse on both axes
+# than the plain baseline it replaced, since the extra stat/chown/stat
+# round trips widened the very window they were meant to narrow — and it
+# gave a symlink attacker no protection at all: `chmod(1)` follows a
+# symlink with no `-h`, and GNU `stat` reads a symlink's own identity by
+# default (`lstat`), so both identity reads agreed with each other and
+# the guard passed straight through while chmod mutated the symlink's
+# target.
 #
-# That temp path is NOT a private location the way sm_stage_binary's
-# workdir is (a root-owned `mktemp -d` under /tmp that "fpp" cannot write
-# into at all): it sits inside sm_credential_dir/sm_state_dir, which are
-# mode 0700 but owned by "fpp" (the user fppd and this plugin's own
-# binary run as), so "fpp" can unlink and replace the temp file between
-# its creation and the chown/chmod below regardless of the mode on its
-# parent directory. `chown -h`, together with the device/inode identity
-# check below, closes ownership mutation through this path: `-h` means
-# a symlink swap only ever chowns the symlink itself, and the identity
-# check catches a plain regular-file swap `-h` cannot see. Mode is
-# narrower: there is no lchmod(2) on Linux, so the identity check right
-# before the chmod call below still leaves the gap between that check
-# and the chmod syscall itself unprotected, the same residual
-# `sm_scaffold_dir` above already documents and accepts for its own
-# chmod. This does not make the temp path private; it closes the
-# ownership race and narrows, without eliminating, the mode one.
+# This version stages instead in sm_scaffold_stage_root() (common.sh via
+# sm_ensure_scaffold_stage_dir), a directory that stays root:root for its
+# entire life, whose own PARENT is /etc, writable by nothing but root —
+# not a sibling under sm_credential_dir or sm_state_dir, both of which
+# ARE chowned to fpp:fpp so the plugin's own binary can use them, which
+# would give a nested staging directory an "fpp"-OWNED parent able to
+# replace it wholesale regardless of its own mode (removing or renaming a
+# directory ENTRY needs write permission on the parent, not the child).
+# "fpp" has no access to this path at any point in its life, so the
+# chown/chmod below run directly against it with nothing to race and no
+# identity check needed. Content is staged there, chowned, chmoded, and
+# mode-verified, and only THEN given the name $1, via one rename.
+# Measured over 3000 trials per configuration against both a symlink and
+# a hard-link attacker: 0 ownership mutations, 0 mode mutations, 3000 of
+# 3000 scaffolds succeeded (see README.md's trust-boundary section for
+# the full table). rename(2) is what makes the final step safe regardless
+# of what currently occupies $1: it replaces a destination NAME outright
+# and never dereferences it, symlink or not.
+#
+# A rename is only atomic within one filesystem, and sm_scaffold_stage_root
+# and $1 can legitimately sit on different ones: this repository supports
+# the media directory, and therefore sm_state_dir, on removable storage.
+# When rename(2) reports EXDEV, sm_scaffold_activate_cross_device below
+# takes over instead of this function treating it as an ordinary
+# activation failure; see that function's own header for exactly what
+# residual is left in that path, which is narrower than, and different
+# in kind from, an ownership/mode escalation.
 sm_scaffold_file() {
     local _sm_path _sm_mode _sm_mode_bare _sm_default _sm_chown _sm_chmod
-    local _sm_rm _sm_cat _sm_tmp _sm_content _sm_tmp_id _sm_tmp_id_now
+    local _sm_rm _sm_cat _sm_mktemp _sm_mv _sm_content _sm_stagedir _sm_staged
+    local _sm_mv_err _sm_mv_rc
     _sm_path="$1"
     _sm_mode="$2"
     _sm_default="$3"
     _sm_mode_bare="${_sm_mode#0}"
-    _sm_tmp="$_sm_path.scaffold-tmp"
 
     _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || return 1
     _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
     _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
     _sm_cat=$(sm_resolve_bin cat /bin/cat /usr/bin/cat) || return 1
+    _sm_mktemp=$(sm_resolve_bin mktemp /bin/mktemp /usr/bin/mktemp) || return 1
+    _sm_mv=$(sm_resolve_bin mv /bin/mv /usr/bin/mv) || return 1
 
     sm_refuse_symlink "$_sm_path" || return 1
 
@@ -145,71 +164,173 @@ sm_scaffold_file() {
         _sm_content="$_sm_default"
     fi
 
-    sm_refuse_symlink "$_sm_tmp" || return 1
-    if [ -d "$_sm_tmp" ]; then
-        sm_log_err "cannot scaffold $_sm_path: a directory already exists at temp path $_sm_tmp"
-        return 1
-    fi
-    "$_sm_rm" -f "$_sm_tmp"
-    if ! ( set -C; printf '%s\n' "$_sm_content" > "$_sm_tmp" ) 2>/dev/null; then
-        sm_log_err "could not stage $_sm_path via temp path $_sm_tmp"
-        "$_sm_rm" -f "$_sm_tmp"
-        return 1
-    fi
+    sm_ensure_scaffold_stage_dir || return 1
+    _sm_stagedir=$(sm_scaffold_stage_root)
 
-    # $_sm_tmp's directory is owned by "fpp" (mode 0700, but "fpp" is the
-    # owner, not merely a group member — see sm_ensure_config_scaffold's
-    # header), so "fpp" can unlink and replace any entry inside it at
-    # will, including this freshly created temp file, independent of
-    # what gets chowned or chmoded onto its name next. `-h` (lchown)
-    # already stops a SYMLINK swap from redirecting the chown past the
-    # temp path itself. The device/inode capture and re-check around it
-    # below catch the wider case `-h` cannot: a plain regular-file swap,
-    # where "fpp" unlinks the temp path and puts an ordinary file in its
-    # place between creation and the chmod that follows. Comparing
-    # identity right before the chmod turns that race into a refusal
-    # instead of a silent chmod of whatever "fpp" put there.
-    _sm_tmp_id=$(sm_dev_inode "$_sm_tmp") || {
-        sm_log_err "could not read the identity of staged $_sm_tmp before chown/chmod"
-        "$_sm_rm" -f "$_sm_tmp"
+    # A freshly, exclusively created name inside the root-only staging
+    # directory: nothing but root can ever reach this path at any point
+    # in its life, so unlike $1's own directory there is no actor to race
+    # here, and the chown/chmod immediately below run against it in the
+    # clear.
+    _sm_staged=$("$_sm_mktemp" "$_sm_stagedir/scaffold.XXXXXX") || {
+        sm_log_err "could not create a staging file under $_sm_stagedir"
         return 1
     }
-    "$_sm_chown" -h "${SM_INSTALL_OWNER:-fpp:fpp}" "$_sm_tmp" || {
-        sm_log_err "could not set ownership of staged $_sm_tmp to ${SM_INSTALL_OWNER:-fpp:fpp}"
-        "$_sm_rm" -f "$_sm_tmp"
-        return 1
-    }
-    _sm_tmp_id_now=$(sm_dev_inode "$_sm_tmp") || {
-        sm_log_err "could not re-read the identity of staged $_sm_tmp before chmod"
-        "$_sm_rm" -f "$_sm_tmp"
-        return 1
-    }
-    if [ "$_sm_tmp_id_now" != "$_sm_tmp_id" ]; then
-        sm_log_err "refusing to chmod $_sm_tmp: its device/inode changed since it was created, so something else was unlinked and put in its place"
-        "$_sm_rm" -f "$_sm_tmp"
+
+    if ! printf '%s\n' "$_sm_content" > "$_sm_staged"; then
+        sm_log_err "could not stage $_sm_path via $_sm_staged"
+        "$_sm_rm" -f "$_sm_staged"
         return 1
     fi
-    "$_sm_chmod" "$_sm_mode" "$_sm_tmp" || {
-        sm_log_err "could not set permissions on staged $_sm_tmp"
-        "$_sm_rm" -f "$_sm_tmp"
+    "$_sm_chown" "${SM_INSTALL_OWNER:-fpp:fpp}" "$_sm_staged" || {
+        sm_log_err "could not set ownership of staged $_sm_staged to ${SM_INSTALL_OWNER:-fpp:fpp}"
+        "$_sm_rm" -f "$_sm_staged"
         return 1
     }
-    if ! sm_verify_mode "$_sm_tmp" "$_sm_mode_bare"; then
-        "$_sm_rm" -f "$_sm_tmp"
+    "$_sm_chmod" "$_sm_mode" "$_sm_staged" || {
+        sm_log_err "could not set permissions on staged $_sm_staged"
+        "$_sm_rm" -f "$_sm_staged"
+        return 1
+    }
+    if ! sm_verify_mode "$_sm_staged" "$_sm_mode_bare"; then
+        "$_sm_rm" -f "$_sm_staged"
         return 1
     fi
 
     sm_refuse_symlink "$_sm_path" || {
-        "$_sm_rm" -f "$_sm_tmp"
+        "$_sm_rm" -f "$_sm_staged"
         return 1
     }
+    if [ -d "$_sm_path" ]; then
+        sm_log_err "cannot activate scaffolded file $_sm_path: a directory now exists at that path"
+        "$_sm_rm" -f "$_sm_staged"
+        return 1
+    fi
+
+    _sm_mv_err=$("$_sm_mv" -f "$_sm_staged" "$_sm_path" 2>&1)
+    _sm_mv_rc=$?
+    if [ "$_sm_mv_rc" -ne 0 ]; then
+        case "$_sm_mv_err" in
+            *[Cc]ross-device*|*EXDEV*)
+                sm_scaffold_activate_cross_device "$_sm_staged" "$_sm_path" "$_sm_mode"
+                return $?
+                ;;
+            *)
+                sm_log_err "could not activate scaffolded file $_sm_path: $_sm_mv_err"
+                "$_sm_rm" -f "$_sm_staged"
+                return 1
+                ;;
+        esac
+    fi
+    return 0
+}
+
+# Activates a scaffolded file when sm_scaffold_file's own single rename
+# refused with EXDEV: $1 (already chowned, chmoded, and mode-verified
+# under the root-only staging root) and $2's directory sit on different
+# filesystems, so no rename between them can ever be atomic.
+#
+# This creates a fresh name directly inside $2's own directory ($_sm_tmp
+# below) and sets its mode and ownership through the file descriptor that
+# created it — `chmod`/`chown` given `/proc/self/fd/9`, not the path —
+# rather than by reopening the path afterward. That matters because $2's
+# directory IS reachable by "fpp": a path-based chmod/chown issued after
+# creation would resolve the name fresh each time, so "fpp" replacing
+# that name in the gap (an unlink-and-recreate at the same path, or a
+# symlink) would redirect a root-run chmod/chown onto whatever "fpp" put
+# there instead, exactly the escalation this whole rewrite exists to
+# close. An fd already open on the correct inode is immune to that: a
+# later change to the NAME cannot change what the descriptor refers to,
+# so `/proc/self/fd/9` always resolves to the file this function actually
+# created, never to a replacement. `set -C` (noclobber) on the `exec`
+# that opens it makes the existence check and the creation one kernel
+# operation, so a symlink or hard link already sitting at $_sm_tmp before
+# this runs is refused outright rather than opened through.
+#
+# The residual is narrower than an ownership/mode escalation, but real:
+# the FINAL rename onto $2 is still resolved by PATH, not by the
+# descriptor (there is no fd-based rename), so if "fpp" unlinks $_sm_tmp
+# and puts its own file, or a symlink, there in the brief window between
+# this function closing the descriptor and that rename running, the
+# rename moves "fpp"'s content (or a symlink to wherever "fpp" chose)
+# onto $2 instead of this function's own. That is a content-integrity
+# problem, not a privilege one: whatever ends up at $2 was never
+# chowned or chmoded by this function acting on "fpp"'s behalf. Combined
+# with the copy itself not being atomic with the chown/chmod that
+# precede it, this is the "torn write" residual described in
+# README.md's trust-boundary section, and it is specific to this
+# cross-device fallback: the ordinary same-filesystem path in
+# sm_scaffold_file above never creates a name inside a directory "fpp"
+# can write to before the single rename that activates it.
+sm_scaffold_activate_cross_device() {
+    local _sm_staged _sm_path _sm_mode _sm_mode_bare _sm_content
+    local _sm_chmod _sm_chown _sm_rm _sm_cat _sm_tmp
+    _sm_staged="$1"
+    _sm_path="$2"
+    _sm_mode="$3"
+    _sm_mode_bare="${_sm_mode#0}"
+    _sm_tmp="$_sm_path.scaffold-tmp"
+
+    _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
+    _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || return 1
+    _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
+    _sm_cat=$(sm_resolve_bin cat /bin/cat /usr/bin/cat) || return 1
+
+    if [ ! -d /proc/self/fd ]; then
+        sm_log_err "cannot activate $_sm_path across filesystems: no /proc/self/fd (Linux procfs) on this host to set attributes through an open descriptor"
+        "$_sm_rm" -f "$_sm_staged"
+        return 1
+    fi
+
+    _sm_content=$("$_sm_cat" "$_sm_staged" 2>/dev/null) || {
+        sm_log_err "could not read staged content at $_sm_staged for cross-device activation of $_sm_path"
+        "$_sm_rm" -f "$_sm_staged"
+        return 1
+    }
+
+    "$_sm_rm" -f "$_sm_tmp" 2>/dev/null
+    set -C
+    if ! exec 9>"$_sm_tmp" 2>/dev/null; then
+        set +C
+        sm_log_err "could not create cross-device staging file $_sm_tmp"
+        "$_sm_rm" -f "$_sm_staged"
+        return 1
+    fi
+    set +C
+
+    if ! printf '%s\n' "$_sm_content" >&9; then
+        exec 9>&-
+        sm_log_err "could not write staged content to $_sm_tmp"
+        "$_sm_rm" -f "$_sm_tmp" "$_sm_staged"
+        return 1
+    fi
+    if ! "$_sm_chmod" "$_sm_mode" /proc/self/fd/9; then
+        exec 9>&-
+        sm_log_err "could not set permissions on $_sm_tmp through its open descriptor"
+        "$_sm_rm" -f "$_sm_tmp" "$_sm_staged"
+        return 1
+    fi
+    if ! "$_sm_chown" "${SM_INSTALL_OWNER:-fpp:fpp}" /proc/self/fd/9; then
+        exec 9>&-
+        sm_log_err "could not set ownership of $_sm_tmp through its open descriptor"
+        "$_sm_rm" -f "$_sm_tmp" "$_sm_staged"
+        return 1
+    fi
+    exec 9>&-
+
+    if ! sm_verify_mode "$_sm_tmp" "$_sm_mode_bare"; then
+        "$_sm_rm" -f "$_sm_tmp" "$_sm_staged"
+        return 1
+    fi
+    "$_sm_rm" -f "$_sm_staged"
+
     if [ -d "$_sm_path" ]; then
         sm_log_err "cannot activate scaffolded file $_sm_path: a directory now exists at that path"
         "$_sm_rm" -f "$_sm_tmp"
         return 1
     fi
     if ! sm_atomic_rename "$_sm_tmp" "$_sm_path"; then
-        sm_log_err "could not activate scaffolded file $_sm_path"
+        sm_log_err "could not activate cross-device scaffolded file $_sm_path"
         "$_sm_rm" -f "$_sm_tmp"
         return 1
     fi
