@@ -163,20 +163,6 @@ sm_arch_stamp_path() {
     printf '%s\n' "$1/.installed-arch"
 }
 
-# Records the sha256 of the binary that was actually live at the moment of
-# the last successful activation, and the version that binary belonged to.
-# Written next to .installed-arch by sm_install_binary's post-activation
-# steps. sm_local_repair (install-core.sh) is the only reader: a local
-# promotion candidate must match the recorded hash before it is trusted,
-# and a recorded version that disagrees with what this host should be
-# running means the repair must not report itself complete without
-# actually reinstalling. See install-core.sh's header for the defect this
-# closes: promoting a same-named, same-mode file with no content check at
-# all.
-sm_hash_stamp_path() {
-    printf '%s\n' "$1/.installed-sha256"
-}
-
 sm_version_stamp_path() {
     printf '%s\n' "$1/.installed-version"
 }

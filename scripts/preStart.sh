@@ -41,18 +41,8 @@ _sm_binary="$_sm_plugin_dir/showmesh-fpp-plugin"
 
 _sm_fppdir=$(sm_fppdir "${FPPDIR:-}")
 
-_sm_try_local_repair=0
 if [ ! -x "$_sm_binary" ]; then
     _sm_repair_reason="binary missing or not executable at $_sm_binary"
-    # Only this case, not the arch-mismatch one below, is worth trying to
-    # repair locally: a cloned-image binary that is present but the wrong
-    # architecture would, if it has one, have a .previous of the same
-    # wrong architecture too, so promoting it fixes nothing. A missing or
-    # non-executable binary is the case a crash between staging and the
-    # final activation rename (or between activation and the transaction
-    # actually committing) can leave behind, with a good binary sitting
-    # right next to the empty target, unused.
-    _sm_try_local_repair=1
 else
     # sm_arch_repair_reason is the testable form of this comparison; see
     # its comment in lib/arch.sh for why it is a function and not left
@@ -68,15 +58,9 @@ fi
 
 sm_log "repair needed: $_sm_repair_reason"
 
-# Every library sm_local_repair depends on (verify.sh for the sha256
-# check, activate.sh for the promotion itself, install-core.sh for the
-# scaffold/chown/stamp steps it must also run, see that function's own
-# comment for why a promotion cannot skip them) is sourced before the
-# local-repair attempt now, not after: all of this is function
-# definitions and local file reads, never the network, so sourcing it
-# early costs nothing and is what lets local repair reach for the same
-# scaffold and stamp logic a full install uses instead of a narrower,
-# divergent copy of it.
+# install-core.sh's own dependencies (verify.sh, fetch.sh, commands.sh,
+# lock.sh, activate.sh) sourced before the network repair below, since
+# they are only function definitions and local file reads.
 . "$_sm_script_dir/lib/verify.sh"
 . "$_sm_script_dir/lib/fetch.sh"
 . "$_sm_script_dir/lib/commands.sh"
@@ -91,11 +75,6 @@ if [ ! -f "$_sm_version_file" ]; then
 fi
 _sm_tr=$(sm_resolve_bin tr /usr/bin/tr /bin/tr) || exit 1
 _sm_version=$("$_sm_tr" -d ' \t\r\n' < "$_sm_version_file")
-
-if [ "$_sm_try_local_repair" -eq 1 ] && sm_local_repair "$_sm_plugin_dir" "$_sm_fppdir" "$_sm_version"; then
-    sm_log "repair complete (promoted a locally verified binary; no network reached)"
-    exit 0
-fi
 
 # A much tighter network budget than a foreground, human-initiated
 # install: this runs at fppd startup and must not block a boot for

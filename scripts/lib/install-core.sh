@@ -133,14 +133,12 @@ sm_ensure_config_scaffold() {
 # why that distinction matters. Activation is stage-then-swap (see
 # lib/activate.sh): the new binary is fully staged and validated before
 # anything at the live target path is touched, and the previous binary is
-# preserved not just until the atomic rename that activates the new one
-# succeeds, but until this function's own post-activation checks (mode
-# re-verification, the arch-stamp write) also succeed; see the
+# preserved until the mode re-verification below also succeeds; see the
 # transaction-boundary comment inside sm_install_binary below.
 sm_install_binary() {
     local _sm_plugin_dir _sm_fppdir _sm_version _sm_arch _sm_tarball_name
     local _sm_base_url _sm_expected_hash _sm_mktemp _sm_workdir _sm_rm _sm_tar
-    local _sm_target _sm_staging _sm_actual_hash
+    local _sm_target _sm_staging _sm_stamp_failed
     _sm_plugin_dir="$1"
     _sm_fppdir="$2"
     _sm_version="$3"
@@ -222,12 +220,12 @@ sm_install_binary() {
 
     # Transaction boundary: sm_activate_binary's rename already made the
     # new binary live, but the previous binary is deliberately still
-    # preserved at $_sm_target.previous until the two steps below also
-    # succeed. Either one failing rolls the live binary back to what was
-    # running before this install started, via sm_activate_rollback,
-    # instead of reporting the install as failed while actually leaving
-    # the new, unverified binary live with no way back, which is what
-    # happened before this boundary existed here.
+    # preserved at $_sm_target.previous until the mode re-verification
+    # below also succeeds. A failure there rolls the live binary back to
+    # what was running before this install started, via
+    # sm_activate_rollback, instead of reporting the install as failed
+    # while actually leaving the new, unverified binary live with no way
+    # back, which is what happened before this boundary existed here.
 
     # Cheap re-confirmation that the rename actually landed a 0755 binary
     # at the target, in the same spirit as every other mode check in this
@@ -237,47 +235,42 @@ sm_install_binary() {
         return 1
     fi
 
-    # Every stamp below is written to a temp file and renamed onto its
-    # final path (sm_write_stamp), never written in place: an in-place
-    # write that fails partway (a full disk, a write-limited filesystem)
-    # would otherwise truncate an existing stamp to empty rather than
-    # leaving it unchanged, and an empty stamp read back later is
-    # indistinguishable from "nothing to compare" in exactly the guard
-    # this stamp exists to feed (see sm_arch_repair_reason in lib/arch.sh).
+    # The binary itself is fully committed here: the previous binary is no
+    # longer needed, and nothing below this line ever rolls the activation
+    # back. Stamps are written strictly AFTER this point and on purpose:
+    # they are metadata describing an already-good, already-live binary,
+    # never data whose own write failure should undo an activation that
+    # already succeeded. An earlier version wrote stamps before this
+    # commit and rolled the binary back on a failed stamp write, which
+    # left a rolled-back binary next to a stamp that still described the
+    # binary that got discarded, since sm_activate_undo restores only the
+    # binary. A stamp write failing now is reported below without
+    # touching the binary that is already correctly in place.
+    sm_activate_commit "$_sm_target"
+
+    # Each stamp is written to a temp file and renamed onto its final
+    # path (sm_write_stamp), never written in place: an in-place write
+    # that fails partway (a full disk, a write-limited filesystem) would
+    # otherwise truncate an existing stamp to empty rather than leaving it
+    # unchanged, and an empty stamp read back later is indistinguishable
+    # from "nothing to compare" in exactly the guard this stamp exists to
+    # feed (see sm_arch_repair_reason in lib/arch.sh).
+    _sm_stamp_failed=0
 
     # See sm_arch_stamp_path's comment: this is what lets preStart.sh
     # catch a cloned-image, wrong-architecture binary that an [ -x ] check
     # alone cannot distinguish from a healthy install.
     if ! sm_write_stamp "$(sm_arch_stamp_path "$_sm_plugin_dir")" "$_sm_arch"; then
-        sm_log_err "could not write architecture stamp for $_sm_target"
-        sm_activate_undo "$_sm_target"
-        return 1
-    fi
-
-    # See sm_hash_stamp_path's comment: this is the recorded-good hash
-    # sm_local_repair below requires a local promotion candidate to match
-    # before ever promoting it, and the recorded version is what keeps a
-    # stale-but-hash-valid candidate from a superseded release being
-    # reported as a complete repair.
-    _sm_actual_hash=$(sm_sha256_of "$_sm_target") || {
-        sm_log_err "could not compute sha256 of activated binary $_sm_target to record it"
-        sm_activate_undo "$_sm_target"
-        return 1
-    }
-    if ! sm_write_stamp "$(sm_hash_stamp_path "$_sm_plugin_dir")" "$_sm_actual_hash"; then
-        sm_log_err "could not write binary sha256 stamp for $_sm_target"
-        sm_activate_undo "$_sm_target"
-        return 1
+        sm_log_err "could not write architecture stamp for $_sm_target; the newly activated binary is live and verified, but this stamp was not recorded"
+        _sm_stamp_failed=1
     fi
     if ! sm_write_stamp "$(sm_version_stamp_path "$_sm_plugin_dir")" "$_sm_version"; then
-        sm_log_err "could not write installed-version stamp for $_sm_target"
-        sm_activate_undo "$_sm_target"
+        sm_log_err "could not write installed-version stamp for $_sm_target; the newly activated binary is live and verified, but this stamp was not recorded"
+        _sm_stamp_failed=1
+    fi
+    if [ "$_sm_stamp_failed" -eq 1 ]; then
         return 1
     fi
-
-    # Every post-activation step succeeded: the transaction is committed,
-    # and the previous binary is no longer needed.
-    sm_activate_commit "$_sm_target"
 
     sm_log "installed showmesh-fpp-plugin $_sm_version ($_sm_arch) to $_sm_target"
     return 0
@@ -296,92 +289,6 @@ sm_install_binary() {
 # the context where nobody is watching to catch a bad outcome. So this
 # function only logs; it is the operator's call, made with eyes open,
 # never this script's.
-# Attempts a network-free repair using only local evidence: a preserved
-# .previous or .staging binary matching the sha256 recorded at this plugin
-# directory's last successful activation (see sm_install_binary's stamp
-# writes above). Never promotes on filename or mode alone: see the header
-# of sm_activate_local_repair in lib/activate.sh for the vulnerability
-# that closes: a `showmesh-fpp-plugin.previous` planted by anything with
-# write access to the plugin directory, which sits under FPP's own media
-# tree.
-#
-# Falls through to the network path (returns 1, with no partial state left
-# behind beyond what sm_activate_local_repair itself may have promoted) in
-# every case it cannot fully confirm: no usable recorded hash, a recorded
-# version that does not match what this host should be running right now
-# (a stale .previous or .staging from an earlier version must not be
-# reported as a completed repair for the CURRENT version), or a promotion
-# that later fails to re-scaffold, re-own, or re-stamp correctly. That
-# last case is deliberate: promoting the binary and then skipping the
-# scaffold, the chown, and the arch stamp is exactly what left a
-# root-owned live binary with a permanently blind architecture guard
-# before this function existed.
-sm_local_repair() {
-    local _sm_plugin_dir _sm_fppdir _sm_version _sm_target
-    local _sm_recorded_version _sm_recorded_hash _sm_arch
-    local _sm_chmod _sm_chown
-    _sm_plugin_dir="$1"
-    _sm_fppdir="$2"
-    _sm_version="$3"
-    _sm_target=$(sm_binary_path "$_sm_plugin_dir")
-
-    _sm_recorded_version=""
-    if [ -f "$(sm_version_stamp_path "$_sm_plugin_dir")" ]; then
-        _sm_recorded_version=$(sm_read_stamp "$(sm_version_stamp_path "$_sm_plugin_dir")")
-    fi
-    if [ -z "$_sm_recorded_version" ] || [ "$_sm_recorded_version" != "$_sm_version" ]; then
-        sm_log "no local record of a successful activation of version $_sm_version (recorded: '${_sm_recorded_version:-none}'); skipping local repair in favor of a full install/upgrade"
-        return 1
-    fi
-
-    _sm_recorded_hash=""
-    if [ -f "$(sm_hash_stamp_path "$_sm_plugin_dir")" ]; then
-        _sm_recorded_hash=$(sm_read_stamp "$(sm_hash_stamp_path "$_sm_plugin_dir")")
-    fi
-    if ! sm_looks_like_sha256 "$_sm_recorded_hash"; then
-        sm_log "no usable local record of the last activated binary's sha256; skipping local repair in favor of a full install/upgrade"
-        return 1
-    fi
-
-    sm_activate_local_repair "$_sm_target" "$_sm_recorded_hash" || return 1
-
-    # sm_activate_local_repair only verifies the CONTENT it promotes; the
-    # mode/ownership scaffolding a normal stage-then-swap install performs
-    # in sm_stage_binary never ran for this candidate (it may have crashed
-    # before reaching it, or may have been written by a process running as
-    # a different user), so it is redone here explicitly rather than
-    # assumed.
-    _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
-    _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || return 1
-    if ! "$_sm_chmod" 0755 "$_sm_target" || ! sm_verify_mode "$_sm_target" 755; then
-        sm_log_err "locally repaired binary at $_sm_target failed mode verification; falling through to a full install/upgrade"
-        return 1
-    fi
-    if ! "$_sm_chown" "${SM_INSTALL_OWNER:-fpp:fpp}" "$_sm_target"; then
-        sm_log_err "could not set ownership of locally repaired binary $_sm_target; falling through to a full install/upgrade"
-        return 1
-    fi
-
-    if ! sm_ensure_config_scaffold; then
-        sm_log_err "locally repaired binary is live but the config scaffold step failed; falling through to a full install/upgrade"
-        return 1
-    fi
-
-    _sm_arch=$(sm_detect_arch "$_sm_fppdir") || {
-        sm_log_err "locally repaired binary is live but architecture re-detection failed; falling through to a full install/upgrade"
-        return 1
-    }
-    if ! sm_write_stamp "$(sm_arch_stamp_path "$_sm_plugin_dir")" "$_sm_arch" \
-        || ! sm_write_stamp "$(sm_hash_stamp_path "$_sm_plugin_dir")" "$_sm_recorded_hash" \
-        || ! sm_write_stamp "$(sm_version_stamp_path "$_sm_plugin_dir")" "$_sm_version"; then
-        sm_log_err "locally repaired binary is live but rewriting its stamps failed; falling through to a full install/upgrade"
-        return 1
-    fi
-
-    sm_log "local repair verified and promoted a binary matching the recorded sha256 for version $_sm_version; scaffold and stamps refreshed, no network reached"
-    return 0
-}
-
 sm_note_possible_restart_need() {
     sm_log "a new or changed command definition may need FPP to restart before it appears in the UI or GET /api/commands. This installer does not do that automatically — what FPP's restart-flag setting does on a host that may be running a live show has not been confirmed, so restart FPP yourself when convenient (never systemctl restart fppd; use FPP's own restart control)."
     return 0

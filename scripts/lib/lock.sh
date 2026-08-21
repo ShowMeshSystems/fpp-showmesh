@@ -68,14 +68,26 @@ sm_lock_version() {
 }
 
 # Prints the sha256 recorded for exactly $2 (an exact filename) in lock
-# file $1. Matched by finding the line that contains that literal
-# "filename" key/value pair and reading "sha256" back off that same line,
-# which is why artifacts.lock.json keeps one artifact object per line
-# rather than pretty-printed across several: the co-occurrence on one line
-# is what lets this stay a grep/sed job instead of needing a real JSON
-# parser, which an FPP host may not have.
+# file $1. Matched by finding the OBJECT that contains that literal
+# "filename" key/value pair and reading "sha256" back off that same
+# object, which is why artifacts.lock.json keeps artifact objects
+# unnested (no object contains another) rather than pretty-printed across
+# several: the co-occurrence within one object boundary is what lets this
+# stay a grep/sed job instead of needing a real JSON parser, which an FPP
+# host may not have.
+#
+# The stream is normalized first so every object stands on its own line
+# regardless of how the lock happens to be formatted (one object per
+# line, this repository's own convention, or every object minified onto
+# a single physical line): flattened to one line, then split at every
+# "},{" object boundary. Since objects never nest, a boundary at a "}"
+# immediately followed by "," and "{" is unambiguous, and this is what
+# keeps a match confined to exactly the object naming the requested
+# filename instead of reading into a neighbouring artifact's fields when
+# several objects share one physical line.
 sm_lock_sha256() {
-    local _sm_lock_file _sm_filename _sm_grep _sm_sed _sm_count _sm_line _sm_hash _sm_marker _sm_rest
+    local _sm_lock_file _sm_filename _sm_grep _sm_sed _sm_marker
+    local _sm_flat _sm_objects _sm_count _sm_object _sm_rest _sm_hash
     _sm_lock_file="$1"
     _sm_filename="$2"
     _sm_grep=$(sm_resolve_bin grep /usr/bin/grep /bin/grep) || return 1
@@ -90,7 +102,18 @@ sm_lock_sha256() {
         return 1
     fi
 
-    _sm_count=$("$_sm_grep" -Fc "\"filename\": \"$_sm_filename\"" "$_sm_lock_file" 2>/dev/null)
+    _sm_flat=$(tr '\n' ' ' < "$_sm_lock_file")
+    _sm_objects=$(printf '%s' "$_sm_flat" | "$_sm_sed" -E 's/\}[[:space:]]*,[[:space:]]*\{/}\
+{/g')
+
+    _sm_marker="\"filename\": \"$_sm_filename\""
+
+    # Counts OCCURRENCES of the marker, not matching LINES: with every
+    # object now on its own line this is the same number, but the
+    # distinction matters because a naive `grep -c` against the ORIGINAL,
+    # unsplit file undercounts two duplicate entries minified onto one
+    # physical line as a single match, letting this guard miss them.
+    _sm_count=$(printf '%s\n' "$_sm_objects" | "$_sm_grep" -Fc "$_sm_marker" 2>/dev/null)
     _sm_count="${_sm_count:-0}"
     if [ "$_sm_count" -eq 0 ]; then
         sm_log_err "artifacts.lock.json has no entry for $_sm_filename"
@@ -101,24 +124,23 @@ sm_lock_sha256() {
         return 1
     fi
 
-    # Even though the filename count check above confirms only one LINE
-    # contains this filename, a minified lock file can put every artifact
-    # object on one single physical line, in which case that "line" also
-    # contains every OTHER artifact's "sha256" key, in file order. Taking
-    # merely the first "sha256" found on the line (what this used to do)
-    # returns the wrong artifact's hash whenever the requested filename is
-    # not the first object on that line. Stripping the line down to
-    # everything AFTER the matched "filename": "<name>" pair, with a plain
-    # shell prefix-removal (glob-literal for the names this repository
-    # actually produces, not a regex, so no escaping is needed), before
-    # extracting a "sha256" key is what makes the first key found after
-    # that point actually belong to the requested artifact.
-    _sm_line=$("$_sm_grep" -F "\"filename\": \"$_sm_filename\"" "$_sm_lock_file")
-    _sm_marker="\"filename\": \"$_sm_filename\""
-    _sm_rest="${_sm_line#*"$_sm_marker"}"
+    _sm_object=$(printf '%s\n' "$_sm_objects" | "$_sm_grep" -F "$_sm_marker")
+
+    # This entry's own object is isolated to one line now, so a neighbour
+    # sharing the original physical line can no longer be mistaken for
+    # it. Within it, "sha256" is demanded to come AFTER "filename": this
+    # repository generates and commits its own lock in exactly that key
+    # order, and a regenerated lock that reorders an object's keys is not
+    # a shape this parser guesses at — see the empty-result branch below.
+    _sm_rest="${_sm_object#*"$_sm_marker"}"
     _sm_hash=$(printf '%s\n' "$_sm_rest" | "$_sm_grep" -o '"sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | "$_sm_sed" -E 's/.*:[[:space:]]*"([^"]*)"/\1/' | "$_sm_sed" -n '1p')
+
     if [ -z "$_sm_hash" ]; then
-        sm_log_err "artifacts.lock.json entry for $_sm_filename has no sha256 field"
+        if printf '%s\n' "$_sm_object" | "$_sm_grep" -q '"sha256"'; then
+            sm_log_err "artifacts.lock.json entry for $_sm_filename has a \"sha256\" field that does not come after \"filename\" in the source text; refusing a lock this parser cannot read unambiguously rather than guessing at a different key order"
+        else
+            sm_log_err "artifacts.lock.json entry for $_sm_filename has no sha256 field"
+        fi
         return 1
     fi
 

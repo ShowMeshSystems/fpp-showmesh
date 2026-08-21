@@ -208,20 +208,24 @@ test/
   architecture than a fresh detection now reports — exactly what a disk
   image cloned from a host of a different architecture produces, and a
   case a plain `[ -x ]` check cannot see (a cloned binary is present and
-  executable; it is just wrong). For the missing-binary case, it first
-  tries a network-free local repair: promoting a preserved `.previous` or
-  `.staging` binary onto the target, but only if its content matches the
-  sha256 recorded at the last successful activation (see
-  `sm_hash_stamp_path` in `lib/common.sh`), never on filename and mode
-  alone. A local repair still re-scaffolds permissions, re-owns the
-  binary, and rewrites its stamps just like a full install would; if any
-  of those steps fails, it falls through to a full install/upgrade
-  instead of reporting itself complete. When local repair is not
-  applicable or falls through, a repair re-runs the full install/upgrade
-  path, not only the binary fetch, so it also re-scaffolds permissions,
-  and its network calls use a much tighter timeout budget than a
-  foreground, human-initiated install, since this blocks `fppd` starting
-  and must not eat minutes of a networkless boot.
+  executable; it is just wrong). Either condition re-runs the full
+  install/upgrade path, not only the binary fetch, so a repair also
+  re-scaffolds permissions, and its network calls use a much tighter
+  timeout budget than a foreground, human-initiated install, since this
+  blocks `fppd` starting and must not eat minutes of a networkless boot.
+  There is no local, networkless repair path: an earlier version of this
+  script tried promoting a preserved `.previous` or `.staging` binary
+  before reaching the network, gated on a sha256 recorded next to the
+  binary, but that recorded hash sat in the same, equally writable
+  directory as the candidate it was meant to authorize, and the
+  promotion itself followed symlinks through `stat`, the hash check, and
+  `mv -f`. Both are real root-privilege escalation paths on a directory
+  this project does not otherwise treat as trusted, and the crash window
+  local repair existed to cover — the old two-rename activation briefly
+  leaving the target unoccupied — is already closed by the hard-linked
+  backup and single atomic rename this repository now uses instead, so
+  the tradeoff no longer has a justification. A missing or wrong binary
+  now always waits for the network repair above.
 - **`commands/run-macro.sh`** — the script FPP forks when the registered
   `ShowMeshRunMacro` command fires. Locates the installed binary and execs
   `showmesh-fpp-plugin run --config-dir <statedir> -- <macroId>`; every
@@ -448,6 +452,13 @@ any FPP host involved:
   installed, and the compromised-host case: a downloaded tarball and a
   downloaded `SHA256SUMS` that agree with each other but disagree with the
   committed lock, rejected on the lock's authority, not the manifest's.
+  Two entries naming the same filename are refused as ambiguous, both one
+  per line and minified onto a single physical line (a naive line-count
+  guard undercounts the minified case as one match). An artifact object
+  whose `sha256` key is written before its `filename` key, which this
+  parser does not guess an order for, is refused rather than silently
+  returning the wrong hash, including the case that used to return a
+  neighbouring artifact's hash on a minified, multi-object line.
 - Stage-then-swap binary activation (`sm_stage_binary`, `sm_activate_binary`,
   `sm_activate_commit`, `sm_activate_rollback`): a clean fresh install with
   no previous binary, a failure injected during post-staging validation
@@ -460,37 +471,36 @@ any FPP host involved:
   succeeded. The backup mechanism itself: `sm_activate_binary` calls the
   atomic rename exactly once when a previous binary exists, because the
   backup is a hard link, not a second rename, proven by a call count and
-  by device/inode identity; and the `cp -p` fallback for a filesystem that
-  does not support hard links, exercised for real with `ln` itself
-  shadowed to fail, not only by hand. `sm_activate_local_repair`: a local
-  candidate matching the recorded sha256 is promoted, a candidate matching
-  only in filename and mode but not content is discarded rather than
-  promoted, no usable recorded hash refuses local repair outright, and the
-  staging candidate is tried and verified the same way. `sm_local_repair`
-  (`install-core.sh`): a recorded version and hash matching the requested
-  install is repaired end to end with the scaffold, ownership, and stamps
-  all refreshed; a recorded version older than the one requested falls
-  through to a full install/upgrade rather than reporting itself complete;
-  and a promotion whose scaffold step then fails also falls through.
-  `sm_write_stamp`: an ordinary write, and a write that cannot even create
-  its temp file leaving an existing stamp untouched rather than truncated.
+  by device/inode identity captured on the live target BEFORE the swap
+  runs, so the comparison cannot pass by coincidence once the target's
+  inode has already changed; and the `cp -p` fallback for a filesystem
+  that does not support hard links, exercised for real with `ln` itself
+  shadowed to fail, not only by hand. `sm_write_stamp`: an ordinary
+  write; a symlinked destination or a symlinked temp path both refused
+  without writing through them; a leftover directory at the temp path
+  cleared so the write can proceed instead of failing forever; and a
+  write that genuinely cannot create its temp file leaving an existing
+  stamp untouched rather than truncated.
 - `sm_install_binary` and `sm_install_or_upgrade`, end to end, with
   `sm_detect_arch` and `sm_download` shadowed so nothing here touches the
   network: a clean fresh install; a lock hash that disagrees with the
   served bytes, refused with the previous binary surviving byte-identical
   and executable; a fresh install whose swap fails, leaving nothing
-  half-installed; and a post-activation failure (the arch-stamp write)
-  rolling the live binary back to what was running before the install
-  started: the transaction boundary the "previous binary deleted before
-  last failable steps" finding closed. A post-activation failure on a
-  FRESH install, with no previous binary to roll back to, removes the
-  unverified target instead of reporting failure while leaving it live.
-  Every stamp (architecture, sha256, version) is confirmed written after a
-  successful install. `sm_install_or_upgrade`'s own
-  orchestration (command-script validation gating the config scaffold,
-  the config scaffold gating the binary install) is exercised with
-  `sm_ensure_config_scaffold` shadowed, so this suite never touches
-  `/etc` or the real plugin state directory on the machine running it.
+  half-installed; and a post-activation mode-verification failure (on
+  both an upgrade and a fresh install) rolling the live binary back, or
+  removing an unverified fresh install with nothing to roll back to,
+  before the transaction commits. Once the transaction has committed, a
+  failed architecture-stamp or version-stamp write is reported as a
+  failure but no longer rolls the binary back: the newly activated binary
+  already passed mode re-verification and stays live, since rolling it
+  back at that point would restore an older binary while leaving a stamp
+  already rewritten to describe the one just discarded. Every stamp
+  (architecture, version) is confirmed written after a successful
+  install. `sm_install_or_upgrade`'s own orchestration (command-script
+  validation gating the config scaffold, the config scaffold gating the
+  binary install) is exercised with `sm_ensure_config_scaffold` shadowed,
+  so this suite never touches `/etc` or the real plugin state directory
+  on the machine running it.
 - Command-script validation: a script that exists and is executable, one
   that is missing, one that exists but is not executable, and a missing
   `descriptions.json`, each producing a distinguishable message — run both

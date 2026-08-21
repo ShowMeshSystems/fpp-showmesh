@@ -34,8 +34,7 @@
 # created. That is what turns the swap back into a genuine single
 # atomic rename: the target name is never briefly unoccupied.
 #
-# Requires scripts/lib/common.sh and scripts/lib/verify.sh (sm_sha256_of,
-# sm_looks_like_sha256) to already be sourced.
+# Requires scripts/lib/common.sh to already be sourced.
 
 # Thin wrapper around `mv -f`, factored out to one call site so tests can
 # shadow this single function (the same shadowing technique arch.sh's
@@ -179,13 +178,23 @@ sm_activate_commit() {
     "$_sm_rm" -f "$_sm_target.previous"
 }
 
-# Rolls $1 back to its preserved previous binary after a failure that
-# happened AFTER sm_activate_binary's swap already succeeded. (A failure
-# of the swap itself needs no rollback at all; see sm_activate_binary's
-# own comment; this function is for the case where the swap worked and a
-# later step in the same transaction did not.) Renames $1.previous back
-# onto $1: a single atomic rename, the same all-or-nothing operation
-# sm_activate_binary itself relies on.
+# Writes a stamp file at $1 with content $2 by writing to a temp path and
+# renaming it into place, so a write that fails partway (a full disk, a
+# write-limited filesystem) leaves an existing stamp at $1 untouched
+# instead of truncated.
+#
+# Both $1 and its temp path $1.tmp are refused if either is a symlink,
+# not just written through. A stamp file lives in the plugin directory,
+# which carries the same writability as everything else this project
+# activates there; a `.installed-arch.tmp` planted as a symlink to a
+# root-owned file elsewhere would otherwise have the `printf` below
+# truncate and rewrite whatever it points at, running as root, and the
+# in-place write this function replaced had the identical hole at the
+# stamp path itself. A leftover DIRECTORY at the temp path, unlike a
+# symlink, is not an attack and is cleared rather than refused: an old
+# build of this function (or an interrupted run) could leave one behind,
+# and `rm -f` alone cannot remove it, which otherwise breaks every later
+# write to the same stamp with no way to recover.
 sm_write_stamp() {
     local _sm_path _sm_content _sm_tmp _sm_rm
     _sm_path="$1"
@@ -193,6 +202,10 @@ sm_write_stamp() {
     _sm_tmp="$_sm_path.tmp"
     _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
 
+    if [ -L "$_sm_path" ]; then
+        sm_log_err "cannot write stamp file $_sm_path: a symlink already exists at that path; refusing to write through it"
+        return 1
+    fi
     # `mv -f` onto a destination that exists as a DIRECTORY does not fail:
     # it moves the source inside that directory instead, which would leave
     # $_sm_path itself untouched (still a directory) while silently
@@ -201,6 +214,17 @@ sm_write_stamp() {
     if [ -d "$_sm_path" ]; then
         sm_log_err "cannot write stamp file $_sm_path: a directory already exists at that path"
         return 1
+    fi
+
+    if [ -L "$_sm_tmp" ]; then
+        sm_log_err "cannot write stamp file $_sm_path: a symlink exists at temp path $_sm_tmp; refusing to write through it"
+        return 1
+    fi
+    if [ -d "$_sm_tmp" ]; then
+        if ! "$_sm_rm" -rf "$_sm_tmp"; then
+            sm_log_err "cannot write stamp file $_sm_path: a leftover directory at temp path $_sm_tmp could not be removed"
+            return 1
+        fi
     fi
 
     if ! printf '%s\n' "$_sm_content" > "$_sm_tmp"; then
@@ -262,69 +286,3 @@ sm_activate_rollback() {
     return 1
 }
 
-# Local-only repair: promotes an already-preserved previous binary, or a
-# fully staged-and-validated but never-activated one, onto $1 without any
-# network access, but ONLY if its content actually matches $2, the sha256
-# recorded (see sm_hash_stamp_path in common.sh) at the moment of the last
-# successful activation. Meant for preStart.sh's boot-time repair path, on
-# a short network budget, to try before it ever reaches for a download: a
-# crash between sm_activate_binary's backup step and its final rename (or
-# between staging and activation, on the very next run) leaves a good
-# binary sitting right next to the empty target, unused, while the network
-# repair below is what a networkless boot has no time for.
-#
-# The hash check is not optional. An earlier version of this function
-# promoted on filename and mode (0755) alone: a `showmesh-fpp-plugin.
-# previous` planted by anything with write access to the plugin
-# directory, which sits under FPP's own media tree, writable by the fpp
-# user FPP itself runs as, would be renamed straight onto the live
-# binary path with no content check at all, and preStart.sh would report
-# success having never consulted the network or a trust anchor. A
-# candidate that does not match the recorded hash is deleted here, not
-# promoted; the caller falls through to the network path.
-#
-# Returns 0 (and leaves $1 live and executable) only if a local promotion
-# actually happened; returns 1 with nothing left live at $1 if $1 is
-# already fine, or if no candidate both existed at mode 0755 and matched
-# the recorded hash; callers fall through to the network repair path in
-# that case. Non-matching candidates are removed as they are found, even
-# on the return-1 path, so a bad candidate is never left around to be
-# reconsidered.
-sm_activate_local_repair() {
-    local _sm_target _sm_expected_hash _sm_backup _sm_staging _sm_rm _sm_candidate _sm_candidate_hash
-    _sm_target="$1"
-    _sm_expected_hash="$2"
-    _sm_backup="$_sm_target.previous"
-    _sm_staging="$_sm_target.staging"
-    _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
-
-    if [ -x "$_sm_target" ]; then
-        return 1
-    fi
-
-    if ! sm_looks_like_sha256 "$_sm_expected_hash"; then
-        sm_log_err "refusing local repair of $_sm_target: no valid recorded sha256 to verify a candidate against"
-        return 1
-    fi
-
-    for _sm_candidate in "$_sm_backup" "$_sm_staging"; do
-        if [ ! -f "$_sm_candidate" ] || ! sm_verify_mode "$_sm_candidate" 755 2>/dev/null; then
-            continue
-        fi
-
-        _sm_candidate_hash=$(sm_sha256_of "$_sm_candidate" 2>/dev/null)
-        if [ "$_sm_candidate_hash" != "$_sm_expected_hash" ]; then
-            sm_log_err "local candidate $_sm_candidate does not match the sha256 recorded at the last successful activation; discarding it rather than promoting an unverified binary"
-            "$_sm_rm" -f "$_sm_candidate"
-            continue
-        fi
-
-        if sm_atomic_rename "$_sm_candidate" "$_sm_target"; then
-            sm_log "promoted verified local binary at $_sm_candidate to $_sm_target; no network repair needed"
-            return 0
-        fi
-        sm_log_err "found a verified local binary at $_sm_candidate but could not promote it to $_sm_target"
-    done
-
-    return 1
-}

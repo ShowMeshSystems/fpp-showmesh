@@ -32,24 +32,26 @@ sm_fpp_binary_candidates() {
 }
 
 sm_find_fpp_binary() {
-    local _sm_fppdir _sm_candidate
+    local _sm_fppdir _sm_candidate _sm_tr
     _sm_fppdir="$1"
+    _sm_tr=$(sm_resolve_bin tr /usr/bin/tr /bin/tr) || return 1
     for _sm_candidate in $(sm_fpp_binary_candidates "$_sm_fppdir"); do
         if [ -f "$_sm_candidate" ]; then
             printf '%s\n' "$_sm_candidate"
             return 0
         fi
     done
-    sm_log_err "no FPP binary found to probe for its ELF class (checked: $(sm_fpp_binary_candidates "$_sm_fppdir" | tr '\n' ' '))"
+    sm_log_err "no FPP binary found to probe for its ELF class (checked: $(sm_fpp_binary_candidates "$_sm_fppdir" | "$_sm_tr" '\n' ' '))"
     return 1
 }
 
 # Prints the ELF magic bytes of a file as lowercase hex, e.g. "7f454c46".
 sm_elf_magic() {
-    local _sm_dd _sm_od
+    local _sm_dd _sm_od _sm_tr
     _sm_dd=$(sm_resolve_bin dd /bin/dd /usr/bin/dd) || return 1
     _sm_od=$(sm_resolve_bin od /usr/bin/od /bin/od) || return 1
-    "$_sm_dd" if="$1" bs=1 count=4 2>/dev/null | "$_sm_od" -An -tx1 | tr -d ' \n'
+    _sm_tr=$(sm_resolve_bin tr /usr/bin/tr /bin/tr) || return 1
+    "$_sm_dd" if="$1" bs=1 count=4 2>/dev/null | "$_sm_od" -An -tx1 | "$_sm_tr" -d ' \n'
 }
 
 sm_elf_magic_ok() {
@@ -59,10 +61,11 @@ sm_elf_magic_ok() {
 # Prints 32 or 64, read from byte offset 4 (the EI_CLASS field: 1 = ELFCLASS32,
 # 2 = ELFCLASS64) of the given ELF file.
 sm_elf_class() {
-    local _sm_dd _sm_od _sm_byte
+    local _sm_dd _sm_od _sm_tr _sm_byte
     _sm_dd=$(sm_resolve_bin dd /bin/dd /usr/bin/dd) || return 1
     _sm_od=$(sm_resolve_bin od /usr/bin/od /bin/od) || return 1
-    _sm_byte=$("$_sm_dd" if="$1" bs=1 skip=4 count=1 2>/dev/null | "$_sm_od" -An -tu1 | tr -d ' \n')
+    _sm_tr=$(sm_resolve_bin tr /usr/bin/tr /bin/tr) || return 1
+    _sm_byte=$("$_sm_dd" if="$1" bs=1 skip=4 count=1 2>/dev/null | "$_sm_od" -An -tu1 | "$_sm_tr" -d ' \n')
     case "$_sm_byte" in
         1) printf '32\n' ;;
         2) printf '64\n' ;;
