@@ -35,7 +35,8 @@ if [ ! -f "$_sm_version_file" ]; then
     sm_log_err "VERSION file missing from plugin directory: $_sm_version_file"
     exit 1
 fi
-_sm_version=$(tr -d ' \t\r\n' < "$_sm_version_file")
+_sm_tr=$(sm_resolve_bin tr /usr/bin/tr /bin/tr) || exit 1
+_sm_version=$("$_sm_tr" -d ' \t\r\n' < "$_sm_version_file")
 
 sm_log "upgrading showmesh-fpp-plugin to $_sm_version (FPPDIR=$_sm_fppdir, plugin dir=$_sm_plugin_dir)"
 

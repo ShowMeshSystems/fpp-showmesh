@@ -37,7 +37,7 @@ sm_lock_path() {
 # specifically; picking the first match in file order (what this function
 # used to do) is only correct by accident, for exactly one key ordering.
 sm_lock_version() {
-    local _sm_lock_file _sm_grep _sm_sed _sm_line
+    local _sm_lock_file _sm_grep _sm_sed _sm_line _sm_count
     _sm_lock_file="$1"
     _sm_grep=$(sm_resolve_bin grep /usr/bin/grep /bin/grep) || return 1
     _sm_sed=$(sm_resolve_bin sed /usr/bin/sed /bin/sed) || return 1
@@ -51,11 +51,18 @@ sm_lock_version() {
         return 1
     fi
 
-    _sm_line=$("$_sm_grep" -m 1 -o '^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$_sm_lock_file")
-    if [ -z "$_sm_line" ]; then
+    _sm_count=$("$_sm_grep" -c '^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$_sm_lock_file" 2>/dev/null)
+    _sm_count="${_sm_count:-0}"
+    if [ "$_sm_count" -eq 0 ]; then
         sm_log_err "artifacts.lock.json at $_sm_lock_file has no top-level \"version\" field"
         return 1
     fi
+    if [ "$_sm_count" -gt 1 ]; then
+        sm_log_err "artifacts.lock.json at $_sm_lock_file has $_sm_count lines matching a line-start \"version\" field; refusing a lock this parser cannot read unambiguously (a pretty-printed or otherwise reformatted lock can put a per-artifact \"version\" key at line-start too, indistinguishable here from the top-level one)"
+        return 1
+    fi
+
+    _sm_line=$("$_sm_grep" -m 1 -o '^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$_sm_lock_file")
 
     printf '%s\n' "$_sm_line" | "$_sm_sed" -E 's/.*:[[:space:]]*"([^"]*)"/\1/'
 }
@@ -68,7 +75,7 @@ sm_lock_version() {
 # is what lets this stay a grep/sed job instead of needing a real JSON
 # parser, which an FPP host may not have.
 sm_lock_sha256() {
-    local _sm_lock_file _sm_filename _sm_grep _sm_sed _sm_count _sm_line _sm_hash
+    local _sm_lock_file _sm_filename _sm_grep _sm_sed _sm_count _sm_line _sm_hash _sm_marker _sm_rest
     _sm_lock_file="$1"
     _sm_filename="$2"
     _sm_grep=$(sm_resolve_bin grep /usr/bin/grep /bin/grep) || return 1
@@ -97,15 +104,19 @@ sm_lock_sha256() {
     # Even though the filename count check above confirms only one LINE
     # contains this filename, a minified lock file can put every artifact
     # object on one single physical line, in which case that "line" also
-    # contains every OTHER artifact's "sha256" key, and grep -o emits one
-    # output line per match, not per input line: "-m 1" does not limit
-    # that (it caps matching INPUT lines, and there is only one to begin
-    # with here), so it would not help. `sed -n '1p'` after -o is what
-    # actually keeps only the first extracted match, and validating that
-    # single value below is what keeps a minified lock from producing more
-    # than one hash out of a check meant to name exactly one.
+    # contains every OTHER artifact's "sha256" key, in file order. Taking
+    # merely the first "sha256" found on the line (what this used to do)
+    # returns the wrong artifact's hash whenever the requested filename is
+    # not the first object on that line. Stripping the line down to
+    # everything AFTER the matched "filename": "<name>" pair, with a plain
+    # shell prefix-removal (glob-literal for the names this repository
+    # actually produces, not a regex, so no escaping is needed), before
+    # extracting a "sha256" key is what makes the first key found after
+    # that point actually belong to the requested artifact.
     _sm_line=$("$_sm_grep" -F "\"filename\": \"$_sm_filename\"" "$_sm_lock_file")
-    _sm_hash=$(printf '%s\n' "$_sm_line" | "$_sm_grep" -o '"sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | "$_sm_sed" -E 's/.*:[[:space:]]*"([^"]*)"/\1/' | "$_sm_sed" -n '1p')
+    _sm_marker="\"filename\": \"$_sm_filename\""
+    _sm_rest="${_sm_line#*"$_sm_marker"}"
+    _sm_hash=$(printf '%s\n' "$_sm_rest" | "$_sm_grep" -o '"sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | "$_sm_sed" -E 's/.*:[[:space:]]*"([^"]*)"/\1/' | "$_sm_sed" -n '1p')
     if [ -z "$_sm_hash" ]; then
         sm_log_err "artifacts.lock.json entry for $_sm_filename has no sha256 field"
         return 1

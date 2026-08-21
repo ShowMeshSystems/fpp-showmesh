@@ -41,6 +41,16 @@ fail() {
     fi
 }
 
+# For a case this suite genuinely cannot exercise in its current
+# environment (root ignores chmod 000, so an "unreadable file" case has no
+# way to be unreadable) rather than a defect. Counts toward neither pass
+# nor fail, unlike fail(), which would report a failure this suite did not
+# actually observe and an FPP host, which runs as root, would trigger
+# on every run.
+skip() {
+    printf 'skip - %s (%s)\n' "$1" "$2"
+}
+
 assert_eq() {
     # $1 = description, $2 = expected, $3 = actual
     if [ "$2" = "$3" ]; then
@@ -255,6 +265,20 @@ sm_uname_m() { echo sparc64; }
 out=$(sm_arch_repair_reason "$_sm_stampdir" "$_sm_stampdir/fppdir")
 assert_eq "a failed fresh detection produces no repair reason, not a false mismatch" "" "$out"
 
+# An EXISTING but EMPTY stamp file, unlike no stamp file at all, must
+# produce a repair reason: this is what a non-atomic stamp write left
+# behind before it was fixed to write-then-rename (see sm_write_stamp in
+# activate.sh), and treating it the same as "no stamp" would leave the
+# architecture guard permanently blind from that point on.
+: > "$(sm_arch_stamp_path "$_sm_stampdir")"
+sm_uname_m() { echo x86_64; }
+out=$(sm_arch_repair_reason "$_sm_stampdir" "$_sm_stampdir/fppdir")
+if [ -n "$out" ]; then
+    pass "an existing but empty architecture stamp produces a repair reason, not silent health"
+else
+    fail "an existing but empty architecture stamp produces a repair reason, not silent health" "expected non-empty output, got none"
+fi
+
 unset -f sm_uname_m
 
 # ---------------------------------------------------------------------------
@@ -356,6 +380,24 @@ else
     pass "sm_verify_sha256 rejects a non-hex expected-hash argument of the right length"
 fi
 
+# A multi-line argument containing one genuinely valid 64-hex line among
+# other content, and where that embedded line happens to be the file's
+# REAL hash: a line-oriented guard (grep -Eq against the whole value) is
+# fooled by this because it matches ANY line, not the whole value, so it
+# waves the value through as "looks like a hash" and only the downstream
+# checksum-mismatch comparison rejects it. That still fails closed either
+# way (this multi-line value can never string-compare equal to the pure
+# hash sm_sha256_of computes), which is why exit status alone cannot tell
+# these two guards apart: the error message can. A guard that means what
+# it says rejects this before ever computing the tarball's hash at all;
+# a line-oriented guard reports it as a downstream "checksum mismatch"
+# instead, having incorrectly accepted the argument's shape.
+_sm_multiline_hash=$(printf 'garbage line one\n%s\nanother garbage line\n' "$_sm_real_sha")
+out=$(sm_verify_sha256 "$_sm_ckdir/$_sm_tarball" "$_sm_multiline_hash" 2>&1)
+status=$?
+assert_failure "sm_verify_sha256 rejects a multi-line argument containing a valid hex line" "$status"
+assert_contains "the rejection names the malformed argument, not a downstream checksum mismatch (proving the guard itself caught it, not the comparison after it)" "$out" "expected-hash argument"
+
 # ---------------------------------------------------------------------------
 # artifacts.lock.json lookup: the trust anchor sm_install_binary actually
 # verifies against, instead of a checksum manifest fetched from the same
@@ -419,17 +461,20 @@ assert_failure "a malformed sha256 value in the lock is rejected" "$status"
 # A minified lock (every artifact object on one single physical line): the
 # per-filename count guard still confirms exactly one LINE names this
 # filename, but grep -o against that one line finds every OTHER artifact's
-# sha256 key too. sm_lock_sha256 must return exactly this artifact's hash,
-# not that hash plus a second, unrelated one appended after a newline.
+# sha256 key too. Requesting the SECOND entry on the line is the case that
+# actually exercises the bug: taking merely the first sha256 found on the
+# line is coincidentally correct for the first entry, and wrong for every
+# entry after it. sm_lock_sha256 must return exactly the requested
+# artifact's hash regardless of its position on the line.
 _sm_hash_minified_a=$(python3 -c "print('c' * 64)")
 _sm_hash_minified_b=$(python3 -c "print('d' * 64)")
 mkdir -p "$_sm_lockdir-minified"
 printf '{"version": "1.2.3", "artifacts": [{ "filename": "a.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "%s" }, { "filename": "b.tar.gz", "kind": "go-helper", "architecture": "arm64", "sha256": "%s" }]}\n' \
     "$_sm_hash_minified_a" "$_sm_hash_minified_b" > "$_sm_lockdir-minified/artifacts.lock.json"
-out=$(sm_lock_sha256 "$_sm_lockdir-minified/artifacts.lock.json" "a.tar.gz")
+out=$(sm_lock_sha256 "$_sm_lockdir-minified/artifacts.lock.json" "b.tar.gz")
 status=$?
 assert_success "a lookup against a minified (single-line) lock succeeds" "$status"
-assert_eq "a minified lock returns only the requested artifact's hash, not every hash on its line" "$_sm_hash_minified_a" "$out"
+assert_eq "a minified lock returns the SECOND entry's hash, not the first entry's hash on the same line" "$_sm_hash_minified_b" "$out"
 
 # An unreadable lock file must be refused as unreadable specifically, not
 # fall through grep/awk failures into an unrelated "no sha256 field" or
@@ -445,7 +490,7 @@ cat > "$_sm_lockdir-unreadable/artifacts.lock.json" <<JSON
 JSON
 chmod 000 "$_sm_lockdir-unreadable/artifacts.lock.json"
 if [ "$(id -u)" -eq 0 ]; then
-    fail "an unreadable lock file is refused as unreadable" "running as root; chmod 000 has no effect, cannot exercise this case here"
+    skip "an unreadable lock file is refused as unreadable" "running as root; chmod 000 has no effect, cannot exercise this case here"
 else
     out=$(sm_lock_sha256 "$_sm_lockdir-unreadable/artifacts.lock.json" "unreadable.tar.gz" 2>&1)
     status=$?
@@ -469,6 +514,32 @@ cat > "$_sm_lockdir-nested-version/artifacts.lock.json" <<JSON
 JSON
 out=$(sm_lock_version "$_sm_lockdir-nested-version/artifacts.lock.json")
 assert_eq "sm_lock_version reads the top-level version, not a same-named key nested inside an artifact object" "1.2.3" "$out"
+
+# A pretty-printed lock (e.g. the output of `jq .`, one key per line
+# throughout, including inside each artifact object) puts a per-artifact
+# "version" key at line-start too, exactly like the top-level one. This
+# parser cannot tell them apart by position alone, so it must refuse the
+# lock outright rather than silently returning whichever one it finds
+# first, the bug this pretty-printed fixture reproduces.
+mkdir -p "$_sm_lockdir-pretty-ambiguous"
+cat > "$_sm_lockdir-pretty-ambiguous/artifacts.lock.json" <<JSON
+{
+  "version": "1.2.3",
+  "artifacts": [
+    {
+      "filename": "x.tar.gz",
+      "kind": "go-helper",
+      "architecture": "amd64",
+      "version": "9.9.9",
+      "sha256": "$_sm_hash_amd64"
+    }
+  ]
+}
+JSON
+out=$(sm_lock_version "$_sm_lockdir-pretty-ambiguous/artifacts.lock.json" 2>"$_sm_tmp/lock-pretty.err")
+status=$?
+assert_failure "a pretty-printed lock with a per-artifact version also at line-start is refused, not guessed" "$status"
+assert_contains "the refusal names the ambiguity, not a downstream symptom" "$(cat "$_sm_tmp/lock-pretty.err")" "unambiguously"
 
 # The compromised-host case this whole mechanism exists for: a downloaded
 # tarball and a downloaded SHA256SUMS agree with each other (as if the
@@ -827,6 +898,217 @@ status=$?
 assert_failure "sm_activate_rollback with no backup present refuses rather than silently doing nothing" "$status"
 
 # ---------------------------------------------------------------------------
+# sm_activate_binary's backup mechanism: hard link, not the two-rename form
+# it replaced. See activate.sh's file header for why the two-rename form
+# leaves a real crash window where the target name is briefly unoccupied.
+# Nothing above this point in the suite distinguished the two forms: both
+# leave the same final content on disk when nothing fails mid-sequence, so
+# reverting the `ln` back to a second sm_atomic_rename call left the whole
+# suite passing with zero coverage of the actual change. This is the
+# regression test for that gap.
+# ---------------------------------------------------------------------------
+
+echo "== sm_activate_binary backup mechanism (hard link vs two-rename) =="
+
+# The current implementation calls sm_atomic_rename exactly ONCE per
+# sm_activate_binary run when a previous binary exists: only for the final
+# staging-to-target swap, because the backup is a hard link (`ln`), not a
+# rename. The two-rename form this replaced would call it TWICE (once to
+# move the previous binary aside, once for the swap). Counting calls via
+# the same shadowing technique used throughout this file turns that
+# implementation difference into an assertion: reverting the `ln` call
+# back to a second sm_atomic_rename makes this fail.
+_sm_act_target6="$_sm_actdir/hardlink-plugin"
+printf 'previous binary, backed up via a hard link, not a second rename\n' > "$_sm_act_target6"
+chmod 0755 "$_sm_act_target6"
+_sm_act_staging6="$_sm_act_target6.staging"
+printf 'new binary\n' > "$_sm_tmp/act-hardlink-source"
+sm_stage_binary "$_sm_tmp/act-hardlink-source" "$_sm_act_staging6" \
+    || fail "staging succeeds ahead of the hard-link-backup test" "sm_stage_binary itself failed; see stderr above"
+
+_sm_rename_call_count=0
+sm_atomic_rename() {
+    _sm_rename_call_count=$((_sm_rename_call_count + 1))
+    mv -f "$1" "$2"
+}
+sm_activate_binary "$_sm_act_staging6" "$_sm_act_target6" \
+    || fail "activation succeeds ahead of the hard-link-backup test" "sm_activate_binary itself failed; see stderr above"
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/activate.sh"
+assert_eq "sm_activate_binary calls sm_atomic_rename exactly once when a previous binary exists (the swap only; the backup is a hard link, not a second rename)" "1" "$_sm_rename_call_count"
+
+# The hard link itself: right after a successful activation with a
+# previous binary, $target.previous and the bytes that were live at
+# $target immediately before the swap must be byte-identical, and it must
+# have been created via `ln`, not `cp`, when hard links are available:
+# proven by device+inode equality captured at backup-creation time,
+# before the swap overwrites $target with the new content.
+_sm_act_target7="$_sm_actdir/hardlink-inode-plugin"
+printf 'previous binary content for inode check\n' > "$_sm_act_target7"
+chmod 0755 "$_sm_act_target7"
+_sm_act_staging7="$_sm_act_target7.staging"
+printf 'new binary content\n' > "$_sm_tmp/act-inode-source"
+sm_stage_binary "$_sm_tmp/act-inode-source" "$_sm_act_staging7" \
+    || fail "staging succeeds ahead of the hard-link-inode test" "sm_stage_binary itself failed; see stderr above"
+sm_activate_binary "$_sm_act_staging7" "$_sm_act_target7" \
+    || fail "activation succeeds ahead of the hard-link-inode test" "sm_activate_binary itself failed; see stderr above"
+_sm_inode_backup=$(stat -c '%d:%i' "$_sm_act_target7.previous" 2>/dev/null || stat -f '%d:%i' "$_sm_act_target7.previous")
+_sm_inode_target=$(stat -c '%d:%i' "$_sm_act_target7" 2>/dev/null || stat -f '%d:%i' "$_sm_act_target7")
+if [ "$_sm_inode_backup" = "$_sm_inode_target" ]; then
+    fail "the preserved backup and the freshly activated target are different files" "they share an inode; the swap did not actually replace the target's content"
+else
+    pass "the preserved backup and the freshly activated target are different files after the swap"
+fi
+assert_eq "the preserved backup holds the OLD content" "previous binary content for inode check" "$(cat "$_sm_act_target7.previous")"
+
+# ln failing (a filesystem that does not support hard links) must fall
+# back to `cp -p`, exercised for real rather than only by hand: shadow the
+# resolved `ln` itself so sm_stage_binary/sm_activate_binary's own
+# sm_resolve_bin lookups still work for every OTHER tool, only `ln`
+# fails.
+_sm_fake_ln_dir="$_sm_tmp/fake-ln-bin"
+mkdir -p "$_sm_fake_ln_dir"
+cat > "$_sm_fake_ln_dir/ln" <<'FAKELN'
+#!/bin/sh
+exit 1
+FAKELN
+chmod 0755 "$_sm_fake_ln_dir/ln"
+sm_resolve_bin() {
+    if [ "$1" = "ln" ]; then
+        printf '%s\n' "$_sm_fake_ln_dir/ln"
+        return 0
+    fi
+    shift
+    for _sm_candidate in "$@"; do
+        if [ -x "$_sm_candidate" ]; then
+            printf '%s\n' "$_sm_candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+_sm_act_target8="$_sm_actdir/cp-fallback-plugin"
+printf 'previous binary, must be backed up via cp -p since ln is unavailable\n' > "$_sm_act_target8"
+chmod 0755 "$_sm_act_target8"
+_sm_act_staging8="$_sm_act_target8.staging"
+printf 'new binary via cp fallback\n' > "$_sm_tmp/act-cpfallback-source"
+sm_stage_binary "$_sm_tmp/act-cpfallback-source" "$_sm_act_staging8" \
+    || fail "staging succeeds ahead of the cp-fallback test" "sm_stage_binary itself failed; see stderr above"
+out=$(sm_activate_binary "$_sm_act_staging8" "$_sm_act_target8" 2>&1)
+status=$?
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/common.sh"
+assert_success "activation succeeds via the cp -p fallback when ln is unavailable" "$status"
+assert_eq "the target serves the new content after a cp -p fallback activation" "new binary via cp fallback" "$(cat "$_sm_act_target8")"
+assert_eq "the backup created via cp -p holds the OLD content" "previous binary, must be backed up via cp -p since ln is unavailable" "$(cat "$_sm_act_target8.previous")"
+
+# ---------------------------------------------------------------------------
+# sm_activate_local_repair: promotes a candidate ONLY if it matches a
+# recorded sha256, never on filename and mode alone. See its header in
+# activate.sh for the vulnerability this closes: a planted
+# showmesh-fpp-plugin.previous, matching in name and mode but not content,
+# promoted straight onto the live binary path with nothing checked.
+# ---------------------------------------------------------------------------
+
+echo "== sm_write_stamp (write-then-rename stamp writes) =="
+
+_sm_wsdir="$_sm_tmp/write-stamp"
+mkdir -p "$_sm_wsdir"
+
+# The ordinary case: content lands at the path.
+_sm_ws_path="$_sm_wsdir/ok-stamp"
+if sm_write_stamp "$_sm_ws_path" "amd64"; then
+    pass "sm_write_stamp writes a fresh stamp"
+else
+    fail "sm_write_stamp writes a fresh stamp" "unexpected failure"
+fi
+assert_eq "the written stamp holds the given content" "amd64" "$(cat "$_sm_ws_path")"
+assert_eq "no leftover .tmp file after a successful write" "" "$( [ -e "$_sm_ws_path.tmp" ] && echo present )"
+
+# A write that fails must never truncate an EXISTING stamp: the whole
+# point of writing to a temp file and renaming is that a failure before
+# the rename leaves the original untouched. Forced here by making the
+# temp path itself a directory, so the `printf >` redirection fails
+# before any rename is attempted.
+_sm_ws_path2="$_sm_wsdir/existing-stamp"
+printf 'arm64\n' > "$_sm_ws_path2"
+mkdir -p "$_sm_ws_path2.tmp"
+out=$(sm_write_stamp "$_sm_ws_path2" "amd64" 2>&1)
+status=$?
+assert_failure "a write that cannot even create its temp file is rejected" "$status"
+assert_eq "an existing stamp survives a failed write untouched, not truncated" "arm64" "$(cat "$_sm_ws_path2")"
+rmdir "$_sm_ws_path2.tmp"
+
+echo "== sm_activate_local_repair (hash-verified local promotion) =="
+
+_sm_lrdir="$_sm_tmp/local-repair"
+mkdir -p "$_sm_lrdir"
+
+# A candidate that matches the recorded hash: promoted.
+_sm_lr_target="$_sm_lrdir/matching-plugin"
+_sm_lr_backup="$_sm_lr_target.previous"
+printf 'the genuine last-known-good binary\n' > "$_sm_lr_backup"
+chmod 0755 "$_sm_lr_backup"
+_sm_lr_expected_hash=$(sha256sum "$_sm_lr_backup" | awk '{print $1}')
+if sm_activate_local_repair "$_sm_lr_target" "$_sm_lr_expected_hash"; then
+    pass "a local candidate matching the recorded hash is promoted"
+else
+    fail "a local candidate matching the recorded hash is promoted" "unexpected refusal"
+fi
+assert_eq "the promoted candidate's content is live at the target" "the genuine last-known-good binary" "$(cat "$_sm_lr_target")"
+assert_eq "the promoted candidate's old name is gone" "" "$( [ -e "$_sm_lr_backup" ] && echo present )"
+
+# The critical case: a planted file, right name, right mode, WRONG
+# content: the exact scenario a compromised or merely stale `fpp`-owned
+# write to the plugin directory produces. Must be discarded, never
+# promoted, and the caller must fall through to the network path.
+_sm_lr_target2="$_sm_lrdir/planted-plugin"
+_sm_lr_backup2="$_sm_lr_target2.previous"
+printf '#!/bin/sh\necho planted, not the real binary\n' > "$_sm_lr_backup2"
+chmod 0755 "$_sm_lr_backup2"
+_sm_lr_real_hash=$(python3 -c "print('9' * 64)")
+out=$(sm_activate_local_repair "$_sm_lr_target2" "$_sm_lr_real_hash" 2>&1)
+status=$?
+assert_failure "a planted candidate matching in name and mode but NOT content is refused, not promoted" "$status"
+assert_eq "the target is never created from a non-matching candidate" "" "$( [ -e "$_sm_lr_target2" ] && echo present )"
+assert_eq "the non-matching candidate is deleted rather than left around to be reconsidered" "" "$( [ -e "$_sm_lr_backup2" ] && echo present )"
+assert_contains "the refusal names the hash mismatch, not a downstream symptom" "$out" "does not match the sha256"
+
+# No usable recorded hash at all (an old install predating this stamp, or
+# a caller bug): refuse local repair entirely rather than promoting
+# anything unverified.
+_sm_lr_target3="$_sm_lrdir/norecordedhash-plugin"
+_sm_lr_backup3="$_sm_lr_target3.previous"
+printf 'a candidate with nothing trustworthy to check it against\n' > "$_sm_lr_backup3"
+chmod 0755 "$_sm_lr_backup3"
+out=$(sm_activate_local_repair "$_sm_lr_target3" "" 2>&1)
+status=$?
+assert_failure "no valid recorded hash refuses local repair rather than promoting unverified content" "$status"
+assert_eq "the candidate is left in place when there is nothing to verify it against (nothing was promoted, so nothing is deleted either)" "present" "$( [ -e "$_sm_lr_backup3" ] && echo present )"
+
+# The staging candidate is tried when there is no (or no matching) backup,
+# and is subject to the same hash check.
+_sm_lr_target4="$_sm_lrdir/staging-plugin"
+_sm_lr_staging4="$_sm_lr_target4.staging"
+printf 'a staged-but-never-activated binary from a crash between staging and activation\n' > "$_sm_lr_staging4"
+chmod 0755 "$_sm_lr_staging4"
+_sm_lr_staging_hash=$(sha256sum "$_sm_lr_staging4" | awk '{print $1}')
+if sm_activate_local_repair "$_sm_lr_target4" "$_sm_lr_staging_hash"; then
+    pass "a matching staging candidate is promoted when no backup candidate exists"
+else
+    fail "a matching staging candidate is promoted when no backup candidate exists" "unexpected refusal"
+fi
+assert_eq "the promoted staging candidate's content is live at the target" "a staged-but-never-activated binary from a crash between staging and activation" "$(cat "$_sm_lr_target4")"
+
+# An already-live, executable target needs no repair at all.
+_sm_lr_target5="$_sm_lrdir/already-live-plugin"
+printf 'already live and fine\n' > "$_sm_lr_target5"
+chmod 0755 "$_sm_lr_target5"
+out=$(sm_activate_local_repair "$_sm_lr_target5" "irrelevant" 2>&1)
+status=$?
+assert_failure "an already-executable target reports nothing to repair" "$status"
+
+# ---------------------------------------------------------------------------
 # sm_install_binary / sm_install_or_upgrade: the full fetch -> verify ->
 # extract -> stage -> activate -> post-activate pipeline, driven end to
 # end. Nothing here touches the network: sm_detect_arch and sm_download
@@ -865,6 +1147,30 @@ make_tarball() {
     rm -rf "$_sm_mt_dir"
 }
 
+# URL-aware download stub used throughout the install pipeline section
+# below. A mutation swapping in the pre-lock install-core.sh (which fetches
+# BOTH the tarball and a same-origin SHA256SUMS manifest from the same base
+# URL) must not have its manifest request handed the tarball's own gzip
+# bytes: a URL-oblivious stub that served the tarball for every request
+# made that mutation die on binary input inside awk before reaching
+# anything behaviorally interesting, which is worthless as acceptance
+# evidence. This serves the tarball for a URL ending in its own name, and a
+# real, self-consistent SHA256SUMS manifest for any other URL requested
+# against the same base; current code never requests the second URL at
+# all, so this is a no-op for it, and only matters for that mutation check.
+sm_download_serve_tarball_and_sums() {
+    # $1 = requested URL, $2 = destination path, $3 = local tarball
+    # fixture, $4 = tarball name as it appears in the URL
+    case "$1" in
+        */"$4")
+            cp "$3" "$2"
+            ;;
+        *)
+            printf '%s  %s\n' "$(sha256sum "$3" | awk '{print $1}')" "$4" > "$2"
+            ;;
+    esac
+}
+
 make_install_lock() {
     # $1 = lock path, $2 = version, $3 = exact tarball filename, $4 = sha256
     cat > "$1" <<LOCKJSON
@@ -891,7 +1197,7 @@ mkdir -p "$_sm_ip_fresh"
 make_tarball "$_sm_tmp/fresh-good.tar.gz" "fresh install binary content"
 _sm_ip_fresh_hash=$(sha256sum "$_sm_tmp/fresh-good.tar.gz" | awk '{print $1}')
 make_install_lock "$_sm_ip_fresh/artifacts.lock.json" "$_sm_ip_version" "$_sm_ip_tarball_name" "$_sm_ip_fresh_hash"
-sm_download() { cp "$_sm_tmp/fresh-good.tar.gz" "$2"; }
+sm_download() { sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/fresh-good.tar.gz" "$_sm_ip_tarball_name"; }
 
 if sm_install_binary "$_sm_ip_fresh" "$_sm_ip_fppdir_unused" "$_sm_ip_version"; then
     pass "a fresh sm_install_binary run with a matching lock succeeds end to end"
@@ -901,6 +1207,8 @@ fi
 assert_eq "the installed binary's content matches the served tarball" "fresh install binary content" "$(cat "$_sm_ip_fresh/showmesh-fpp-plugin")"
 assert_eq "the installed binary is executable (0755)" "755" "$(sm_current_mode "$_sm_ip_fresh/showmesh-fpp-plugin")"
 assert_eq "the arch stamp is written" "amd64" "$(cat "$_sm_ip_fresh/.installed-arch")"
+assert_eq "the sha256 stamp is written and matches the activated binary" "$(sha256sum "$_sm_ip_fresh/showmesh-fpp-plugin" | awk '{print $1}')" "$(cat "$_sm_ip_fresh/.installed-sha256")"
+assert_eq "the installed-version stamp is written" "$_sm_ip_version" "$(cat "$_sm_ip_fresh/.installed-version")"
 assert_eq "no staging file is left behind after a successful sm_install_binary run" "" "$( [ -e "$_sm_ip_fresh/showmesh-fpp-plugin.staging" ] && echo present )"
 assert_eq "no backup file is left behind after a successful fresh sm_install_binary run" "" "$( [ -e "$_sm_ip_fresh/showmesh-fpp-plugin.previous" ] && echo present )"
 
@@ -916,7 +1224,7 @@ _sm_ip_prev_hash_before=$(sha256sum "$_sm_ip_mismatch/showmesh-fpp-plugin" | awk
 make_tarball "$_sm_tmp/mismatch.tar.gz" "bytes that do not match what the lock expects"
 _sm_ip_wrong_hash=$(python3 -c "print('f' * 64)")
 make_install_lock "$_sm_ip_mismatch/artifacts.lock.json" "$_sm_ip_version" "$_sm_ip_tarball_name" "$_sm_ip_wrong_hash"
-sm_download() { cp "$_sm_tmp/mismatch.tar.gz" "$2"; }
+sm_download() { sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/mismatch.tar.gz" "$_sm_ip_tarball_name"; }
 
 out=$(sm_install_binary "$_sm_ip_mismatch" "$_sm_ip_fppdir_unused" "$_sm_ip_version" 2>&1)
 status=$?
@@ -938,14 +1246,24 @@ mkdir -p "$_sm_ip_swapfail"
 make_tarball "$_sm_tmp/swapfail-good.tar.gz" "binary that must never go live"
 _sm_ip_swapfail_hash=$(sha256sum "$_sm_tmp/swapfail-good.tar.gz" | awk '{print $1}')
 make_install_lock "$_sm_ip_swapfail/artifacts.lock.json" "$_sm_ip_version" "$_sm_ip_tarball_name" "$_sm_ip_swapfail_hash"
-sm_download() { cp "$_sm_tmp/swapfail-good.tar.gz" "$2"; }
-sm_atomic_rename() { return 1; }
+sm_download() { sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/swapfail-good.tar.gz" "$_sm_ip_tarball_name"; }
+# Let staging succeed (sm_atomic_rename is also the rename sm_stage_binary
+# uses to move the extracted binary into staging) and fail only the
+# actual swap onto the target, by destination suffix, so this scenario
+# reaches the swap it is named for instead of dying one step earlier.
+sm_atomic_rename() {
+    case "$2" in
+        *.staging) mv -f "$1" "$2" ;;
+        *) return 1 ;;
+    esac
+}
 
 out=$(sm_install_binary "$_sm_ip_swapfail" "$_sm_ip_fppdir_unused" "$_sm_ip_version" 2>&1)
 status=$?
 # shellcheck disable=SC1090
 . "$_sm_lib_dir/activate.sh"
 assert_failure "a fresh install whose swap fails is refused" "$status"
+assert_contains "the failure actually reached the swap step, not an earlier staging failure" "$out" "could not rename staged binary"
 assert_eq "no target binary exists after a failed fresh-install swap" "" "$( [ -e "$_sm_ip_swapfail/showmesh-fpp-plugin" ] && echo present )"
 assert_eq "no staging file is left behind after a failed fresh-install swap" "" "$( [ -e "$_sm_ip_swapfail/showmesh-fpp-plugin.staging" ] && echo present )"
 assert_eq "no arch stamp is written after a failed fresh-install swap" "" "$( [ -e "$_sm_ip_swapfail/.installed-arch" ] && echo present )"
@@ -964,7 +1282,7 @@ _sm_ip_rollback_prev_hash=$(sha256sum "$_sm_ip_rollback/showmesh-fpp-plugin" | a
 make_tarball "$_sm_tmp/rollback-new.tar.gz" "new binary that activates then must be rolled back"
 _sm_ip_rollback_hash=$(sha256sum "$_sm_tmp/rollback-new.tar.gz" | awk '{print $1}')
 make_install_lock "$_sm_ip_rollback/artifacts.lock.json" "$_sm_ip_version" "$_sm_ip_tarball_name" "$_sm_ip_rollback_hash"
-sm_download() { cp "$_sm_tmp/rollback-new.tar.gz" "$2"; }
+sm_download() { sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/rollback-new.tar.gz" "$_sm_ip_tarball_name"; }
 # Force the arch-stamp write to fail without needing root: a directory
 # sitting where the stamp file must be written makes the `printf >`
 # redirection fail portably, on any filesystem or user.
@@ -983,7 +1301,109 @@ else
 fi
 assert_eq "no backup file remains once the post-activation rollback completes" "" "$( [ -e "$_sm_ip_rollback/showmesh-fpp-plugin.previous" ] && echo present )"
 
+# --- scenario 4: a post-activation failure on a FRESH install (no
+# previous binary at all) must remove the unverified target rather than
+# attempt a rollback that has nothing to roll back to. Before this fix,
+# sm_activate_rollback refused with "no preserved previous binary" and
+# returned failure while the new, unverified binary stayed live and
+# executable at the target, a status-1 report that did not match what
+# was actually on disk. ---
+_sm_ip_freshfail="$_sm_ipdir/fresh-post-activation-failure"
+mkdir -p "$_sm_ip_freshfail"
+make_tarball "$_sm_tmp/freshfail-new.tar.gz" "new binary on a fresh install that must not survive a post-activation failure"
+_sm_ip_freshfail_hash=$(sha256sum "$_sm_tmp/freshfail-new.tar.gz" | awk '{print $1}')
+make_install_lock "$_sm_ip_freshfail/artifacts.lock.json" "$_sm_ip_version" "$_sm_ip_tarball_name" "$_sm_ip_freshfail_hash"
+sm_download() { sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/freshfail-new.tar.gz" "$_sm_ip_tarball_name"; }
+mkdir -p "$_sm_ip_freshfail/.installed-arch"
+
+out=$(sm_install_binary "$_sm_ip_freshfail" "$_sm_ip_fppdir_unused" "$_sm_ip_version" 2>&1)
+status=$?
+assert_failure "a post-activation failure on a fresh install (no previous binary) is refused" "$status"
+assert_eq "no target binary is left live after a fresh install's post-activation failure" "" "$( [ -e "$_sm_ip_freshfail/showmesh-fpp-plugin" ] && echo present )"
+assert_eq "no staging file is left behind either" "" "$( [ -e "$_sm_ip_freshfail/showmesh-fpp-plugin.staging" ] && echo present )"
+assert_contains "the refusal names having nothing to roll back to, not a generic rollback failure" "$out" "no previous binary to roll back to"
+
 unset -f sm_detect_arch sm_download
+
+# --- sm_local_repair: the network-free repair path preStart.sh tries
+# first for a missing/non-executable binary. Never promotes on filename
+# or mode alone (Finding 1), never reports a stale version's binary as a
+# complete repair for the CURRENT version (Finding 2), and never leaves a
+# promoted binary un-scaffolded, un-owned, or un-stamped (Finding 3). ---
+
+echo "== sm_local_repair (network-free repair orchestration) =="
+
+sm_detect_arch() { echo amd64; }
+sm_ensure_config_scaffold() { sm_log "test stub: scaffold skipped"; return 0; }
+
+_sm_lrp_dir="$_sm_ipdir/local-repair-orchestration"
+mkdir -p "$_sm_lrp_dir"
+
+# Simulate a healthy prior install (the state sm_install_binary itself
+# leaves behind) by writing the target, then its stamps, directly.
+_sm_lrp_content="the binary a real previous install actually activated"
+printf '%s\n' "$_sm_lrp_content" > "$_sm_lrp_dir/showmesh-fpp-plugin.previous"
+chmod 0755 "$_sm_lrp_dir/showmesh-fpp-plugin.previous"
+_sm_lrp_hash=$(sha256sum "$_sm_lrp_dir/showmesh-fpp-plugin.previous" | awk '{print $1}')
+printf '%s\n' "$_sm_lrp_hash" > "$_sm_lrp_dir/.installed-sha256"
+printf '%s\n' "$_sm_ip_version" > "$_sm_lrp_dir/.installed-version"
+printf 'amd64\n' > "$_sm_lrp_dir/.installed-arch"
+
+if sm_local_repair "$_sm_lrp_dir" "$_sm_ip_fppdir_unused" "$_sm_ip_version"; then
+    pass "a recorded version and hash matching the current install are locally repaired"
+else
+    fail "a recorded version and hash matching the current install are locally repaired" "unexpected refusal"
+fi
+assert_eq "the repaired binary's content matches the promoted candidate" "$_sm_lrp_content" "$(cat "$_sm_lrp_dir/showmesh-fpp-plugin")"
+assert_eq "the repaired binary is executable (0755)" "755" "$(sm_current_mode "$_sm_lrp_dir/showmesh-fpp-plugin")"
+assert_eq "the arch stamp still reads amd64 after local repair re-wrote it" "amd64" "$(cat "$_sm_lrp_dir/.installed-arch")"
+
+# A stale .previous from an OLDER version than what this host should be
+# running (Finding 2): the recorded version disagrees with the requested
+# one, so this must fall through to a full install/upgrade rather than
+# report itself complete.
+_sm_lrp_stale="$_sm_ipdir/local-repair-stale-version"
+mkdir -p "$_sm_lrp_stale"
+printf 'an old binary from a superseded version\n' > "$_sm_lrp_stale/showmesh-fpp-plugin.previous"
+chmod 0755 "$_sm_lrp_stale/showmesh-fpp-plugin.previous"
+_sm_lrp_stale_hash=$(sha256sum "$_sm_lrp_stale/showmesh-fpp-plugin.previous" | awk '{print $1}')
+printf '%s\n' "$_sm_lrp_stale_hash" > "$_sm_lrp_stale/.installed-sha256"
+printf '8.8.8\n' > "$_sm_lrp_stale/.installed-version"
+out=$(sm_local_repair "$_sm_lrp_stale" "$_sm_ip_fppdir_unused" "$_sm_ip_version" 2>&1)
+status=$?
+assert_failure "a recorded version older than the requested install falls through rather than reporting itself complete" "$status"
+assert_eq "nothing is promoted when the recorded version does not match" "" "$( [ -e "$_sm_lrp_stale/showmesh-fpp-plugin" ] && echo present )"
+
+# No recorded hash at all (an install predating these stamps): fall
+# through, never promote anything unverified.
+_sm_lrp_nohash="$_sm_ipdir/local-repair-no-hash"
+mkdir -p "$_sm_lrp_nohash"
+printf 'a previous binary with no recorded hash to check it against\n' > "$_sm_lrp_nohash/showmesh-fpp-plugin.previous"
+chmod 0755 "$_sm_lrp_nohash/showmesh-fpp-plugin.previous"
+printf '%s\n' "$_sm_ip_version" > "$_sm_lrp_nohash/.installed-version"
+out=$(sm_local_repair "$_sm_lrp_nohash" "$_sm_ip_fppdir_unused" "$_sm_ip_version" 2>&1)
+status=$?
+assert_failure "no recorded hash at all falls through rather than promoting anything unverified" "$status"
+assert_eq "nothing is promoted when there is no recorded hash" "" "$( [ -e "$_sm_lrp_nohash/showmesh-fpp-plugin" ] && echo present )"
+
+# A promotion that succeeds but whose scaffold step then fails must fall
+# through to the network path too (Finding 3), not report a repair that
+# skipped scaffolding as complete.
+_sm_lrp_badscaffold="$_sm_ipdir/local-repair-bad-scaffold"
+mkdir -p "$_sm_lrp_badscaffold"
+printf 'a binary whose scaffold step will fail\n' > "$_sm_lrp_badscaffold/showmesh-fpp-plugin.previous"
+chmod 0755 "$_sm_lrp_badscaffold/showmesh-fpp-plugin.previous"
+_sm_lrp_badscaffold_hash=$(sha256sum "$_sm_lrp_badscaffold/showmesh-fpp-plugin.previous" | awk '{print $1}')
+printf '%s\n' "$_sm_lrp_badscaffold_hash" > "$_sm_lrp_badscaffold/.installed-sha256"
+printf '%s\n' "$_sm_ip_version" > "$_sm_lrp_badscaffold/.installed-version"
+sm_ensure_config_scaffold() { return 1; }
+out=$(sm_local_repair "$_sm_lrp_badscaffold" "$_sm_ip_fppdir_unused" "$_sm_ip_version" 2>&1)
+status=$?
+assert_failure "a promotion whose scaffold step fails falls through to a full install/upgrade" "$status"
+assert_contains "the failure names the scaffold step" "$out" "config scaffold"
+sm_ensure_config_scaffold() { sm_log "test stub: scaffold skipped"; return 0; }
+
+unset -f sm_detect_arch sm_download sm_ensure_config_scaffold
 
 # --- sm_install_or_upgrade: the orchestration around sm_install_binary
 # (command-script validation, the config scaffold, the restart note),
@@ -1006,7 +1426,7 @@ chmod 0755 "$_sm_orch_ok/commands/run-macro.sh"
 make_tarball "$_sm_tmp/orch-good.tar.gz" "orchestration success binary"
 _sm_orch_hash=$(sha256sum "$_sm_tmp/orch-good.tar.gz" | awk '{print $1}')
 make_install_lock "$_sm_orch_ok/artifacts.lock.json" "$_sm_ip_version" "$_sm_ip_tarball_name" "$_sm_orch_hash"
-sm_download() { cp "$_sm_tmp/orch-good.tar.gz" "$2"; }
+sm_download() { sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/orch-good.tar.gz" "$_sm_ip_tarball_name"; }
 
 out=$(sm_install_or_upgrade "$_sm_ip_fppdir_unused" "$_sm_orch_ok" "$_sm_ip_version" 2>&1)
 status=$?

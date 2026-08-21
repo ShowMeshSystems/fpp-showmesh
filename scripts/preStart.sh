@@ -68,17 +68,20 @@ fi
 
 sm_log "repair needed: $_sm_repair_reason"
 
-. "$_sm_script_dir/lib/activate.sh"
-
-if [ "$_sm_try_local_repair" -eq 1 ] && sm_activate_local_repair "$_sm_binary"; then
-    sm_log "repair complete (promoted a local binary; no network reached)"
-    exit 0
-fi
-
-. "$_sm_script_dir/lib/fetch.sh"
+# Every library sm_local_repair depends on (verify.sh for the sha256
+# check, activate.sh for the promotion itself, install-core.sh for the
+# scaffold/chown/stamp steps it must also run, see that function's own
+# comment for why a promotion cannot skip them) is sourced before the
+# local-repair attempt now, not after: all of this is function
+# definitions and local file reads, never the network, so sourcing it
+# early costs nothing and is what lets local repair reach for the same
+# scaffold and stamp logic a full install uses instead of a narrower,
+# divergent copy of it.
 . "$_sm_script_dir/lib/verify.sh"
+. "$_sm_script_dir/lib/fetch.sh"
 . "$_sm_script_dir/lib/commands.sh"
 . "$_sm_script_dir/lib/lock.sh"
+. "$_sm_script_dir/lib/activate.sh"
 . "$_sm_script_dir/lib/install-core.sh"
 
 _sm_version_file="$_sm_plugin_dir/VERSION"
@@ -86,7 +89,13 @@ if [ ! -f "$_sm_version_file" ]; then
     sm_log_err "VERSION file missing from plugin directory: $_sm_version_file; cannot repair"
     exit 1
 fi
-_sm_version=$(tr -d ' \t\r\n' < "$_sm_version_file")
+_sm_tr=$(sm_resolve_bin tr /usr/bin/tr /bin/tr) || exit 1
+_sm_version=$("$_sm_tr" -d ' \t\r\n' < "$_sm_version_file")
+
+if [ "$_sm_try_local_repair" -eq 1 ] && sm_local_repair "$_sm_plugin_dir" "$_sm_fppdir" "$_sm_version"; then
+    sm_log "repair complete (promoted a locally verified binary; no network reached)"
+    exit 0
+fi
 
 # A much tighter network budget than a foreground, human-initiated
 # install: this runs at fppd startup and must not block a boot for

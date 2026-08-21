@@ -208,11 +208,20 @@ test/
   architecture than a fresh detection now reports — exactly what a disk
   image cloned from a host of a different architecture produces, and a
   case a plain `[ -x ]` check cannot see (a cloned binary is present and
-  executable; it is just wrong). A repair re-runs the full install/
-  upgrade path, not only the binary fetch, so it also re-scaffolds
-  permissions, and its network calls use a much tighter timeout budget
-  than a foreground, human-initiated install, since this blocks `fppd`
-  starting and must not eat minutes of a networkless boot.
+  executable; it is just wrong). For the missing-binary case, it first
+  tries a network-free local repair: promoting a preserved `.previous` or
+  `.staging` binary onto the target, but only if its content matches the
+  sha256 recorded at the last successful activation (see
+  `sm_hash_stamp_path` in `lib/common.sh`), never on filename and mode
+  alone. A local repair still re-scaffolds permissions, re-owns the
+  binary, and rewrites its stamps just like a full install would; if any
+  of those steps fails, it falls through to a full install/upgrade
+  instead of reporting itself complete. When local repair is not
+  applicable or falls through, a repair re-runs the full install/upgrade
+  path, not only the binary fetch, so it also re-scaffolds permissions,
+  and its network calls use a much tighter timeout budget than a
+  foreground, human-initiated install, since this blocks `fppd` starting
+  and must not eat minutes of a networkless boot.
 - **`commands/run-macro.sh`** — the script FPP forks when the registered
   `ShowMeshRunMacro` command fires. Locates the installed binary and execs
   `showmesh-fpp-plugin run --config-dir <statedir> -- <macroId>`; every
@@ -448,7 +457,23 @@ any FPP host involved:
   touches its destination, so no separate rollback rename happens or is
   needed), and `sm_activate_rollback` itself restoring the preserved
   previous binary after a failure that happens after the swap already
-  succeeded.
+  succeeded. The backup mechanism itself: `sm_activate_binary` calls the
+  atomic rename exactly once when a previous binary exists, because the
+  backup is a hard link, not a second rename, proven by a call count and
+  by device/inode identity; and the `cp -p` fallback for a filesystem that
+  does not support hard links, exercised for real with `ln` itself
+  shadowed to fail, not only by hand. `sm_activate_local_repair`: a local
+  candidate matching the recorded sha256 is promoted, a candidate matching
+  only in filename and mode but not content is discarded rather than
+  promoted, no usable recorded hash refuses local repair outright, and the
+  staging candidate is tried and verified the same way. `sm_local_repair`
+  (`install-core.sh`): a recorded version and hash matching the requested
+  install is repaired end to end with the scaffold, ownership, and stamps
+  all refreshed; a recorded version older than the one requested falls
+  through to a full install/upgrade rather than reporting itself complete;
+  and a promotion whose scaffold step then fails also falls through.
+  `sm_write_stamp`: an ordinary write, and a write that cannot even create
+  its temp file leaving an existing stamp untouched rather than truncated.
 - `sm_install_binary` and `sm_install_or_upgrade`, end to end, with
   `sm_detect_arch` and `sm_download` shadowed so nothing here touches the
   network: a clean fresh install; a lock hash that disagrees with the
@@ -457,7 +482,11 @@ any FPP host involved:
   half-installed; and a post-activation failure (the arch-stamp write)
   rolling the live binary back to what was running before the install
   started: the transaction boundary the "previous binary deleted before
-  last failable steps" finding closed. `sm_install_or_upgrade`'s own
+  last failable steps" finding closed. A post-activation failure on a
+  FRESH install, with no previous binary to roll back to, removes the
+  unverified target instead of reporting failure while leaving it live.
+  Every stamp (architecture, sha256, version) is confirmed written after a
+  successful install. `sm_install_or_upgrade`'s own
   orchestration (command-script validation gating the config scaffold,
   the config scaffold gating the binary install) is exercised with
   `sm_ensure_config_scaffold` shadowed, so this suite never touches

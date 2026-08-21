@@ -34,7 +34,8 @@
 # created. That is what turns the swap back into a genuine single
 # atomic rename: the target name is never briefly unoccupied.
 #
-# Requires scripts/lib/common.sh to already be sourced.
+# Requires scripts/lib/common.sh and scripts/lib/verify.sh (sm_sha256_of,
+# sm_looks_like_sha256) to already be sourced.
 
 # Thin wrapper around `mv -f`, factored out to one call site so tests can
 # shadow this single function (the same shadowing technique arch.sh's
@@ -185,6 +186,65 @@ sm_activate_commit() {
 # later step in the same transaction did not.) Renames $1.previous back
 # onto $1: a single atomic rename, the same all-or-nothing operation
 # sm_activate_binary itself relies on.
+sm_write_stamp() {
+    local _sm_path _sm_content _sm_tmp _sm_rm
+    _sm_path="$1"
+    _sm_content="$2"
+    _sm_tmp="$_sm_path.tmp"
+    _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
+
+    # `mv -f` onto a destination that exists as a DIRECTORY does not fail:
+    # it moves the source inside that directory instead, which would leave
+    # $_sm_path itself untouched (still a directory) while silently
+    # reporting success. Caught explicitly here rather than trusted to
+    # sm_atomic_rename's exit code.
+    if [ -d "$_sm_path" ]; then
+        sm_log_err "cannot write stamp file $_sm_path: a directory already exists at that path"
+        return 1
+    fi
+
+    if ! printf '%s\n' "$_sm_content" > "$_sm_tmp"; then
+        sm_log_err "could not write stamp file $_sm_tmp"
+        "$_sm_rm" -f "$_sm_tmp"
+        return 1
+    fi
+    if ! sm_atomic_rename "$_sm_tmp" "$_sm_path"; then
+        sm_log_err "could not activate stamp file $_sm_path"
+        "$_sm_rm" -f "$_sm_tmp"
+        return 1
+    fi
+    return 0
+}
+
+# Undoes a successful sm_activate_binary swap after a LATER failure in the
+# same install transaction (see sm_install_binary's transaction-boundary
+# comment in install-core.sh). Rolls back to the preserved previous binary
+# when one exists. When this was a fresh install with nothing to roll back
+# to, an earlier version of this repair called sm_activate_rollback anyway,
+# which refused with "no preserved previous binary" and left the caller
+# reporting failure while the new, unverified binary stayed live and
+# executable at the target with no stamp describing it, a status-1 report
+# that did not match what was actually on disk. This removes the target
+# instead in that case, so a failed fresh install actually leaves nothing
+# installed, matching what it reports.
+sm_activate_undo() {
+    local _sm_target _sm_rm
+    _sm_target="$1"
+
+    if [ -e "$_sm_target.previous" ]; then
+        sm_activate_rollback "$_sm_target"
+        return $?
+    fi
+
+    _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
+    if "$_sm_rm" -f "$_sm_target"; then
+        sm_log_err "no previous binary to roll back to for $_sm_target; removed the unverified fresh install instead of leaving it live"
+        return 0
+    fi
+    sm_log_err "no previous binary to roll back to for $_sm_target, and could not remove the unverified fresh install either; $_sm_target may be live and unverified"
+    return 1
+}
+
 sm_activate_rollback() {
     local _sm_target _sm_backup
     _sm_target="$1"
@@ -204,42 +264,67 @@ sm_activate_rollback() {
 
 # Local-only repair: promotes an already-preserved previous binary, or a
 # fully staged-and-validated but never-activated one, onto $1 without any
-# network access. Meant for preStart.sh's boot-time repair path, on a
-# short network budget, to try before it ever reaches for a download: a
-# crash between sm_activate_binary's backup step and its final rename
-# (or between staging and activation, on the very next run) leaves a
-# good binary sitting right next to the empty target, unused, while the
-# network repair below is what a networkless boot has no time for.
+# network access, but ONLY if its content actually matches $2, the sha256
+# recorded (see sm_hash_stamp_path in common.sh) at the moment of the last
+# successful activation. Meant for preStart.sh's boot-time repair path, on
+# a short network budget, to try before it ever reaches for a download: a
+# crash between sm_activate_binary's backup step and its final rename (or
+# between staging and activation, on the very next run) leaves a good
+# binary sitting right next to the empty target, unused, while the network
+# repair below is what a networkless boot has no time for.
+#
+# The hash check is not optional. An earlier version of this function
+# promoted on filename and mode (0755) alone: a `showmesh-fpp-plugin.
+# previous` planted by anything with write access to the plugin
+# directory, which sits under FPP's own media tree, writable by the fpp
+# user FPP itself runs as, would be renamed straight onto the live
+# binary path with no content check at all, and preStart.sh would report
+# success having never consulted the network or a trust anchor. A
+# candidate that does not match the recorded hash is deleted here, not
+# promoted; the caller falls through to the network path.
 #
 # Returns 0 (and leaves $1 live and executable) only if a local promotion
-# actually happened; returns 1 with nothing changed on disk if $1 is
-# already fine, or if no usable local binary was found to promote;
-# callers fall through to the network repair path in that case.
+# actually happened; returns 1 with nothing left live at $1 if $1 is
+# already fine, or if no candidate both existed at mode 0755 and matched
+# the recorded hash; callers fall through to the network repair path in
+# that case. Non-matching candidates are removed as they are found, even
+# on the return-1 path, so a bad candidate is never left around to be
+# reconsidered.
 sm_activate_local_repair() {
-    local _sm_target _sm_backup _sm_staging
+    local _sm_target _sm_expected_hash _sm_backup _sm_staging _sm_rm _sm_candidate _sm_candidate_hash
     _sm_target="$1"
+    _sm_expected_hash="$2"
     _sm_backup="$_sm_target.previous"
     _sm_staging="$_sm_target.staging"
+    _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
 
     if [ -x "$_sm_target" ]; then
         return 1
     fi
 
-    if [ -f "$_sm_backup" ] && sm_verify_mode "$_sm_backup" 755 2>/dev/null; then
-        if sm_atomic_rename "$_sm_backup" "$_sm_target"; then
-            sm_log "promoted local previous binary at $_sm_backup to $_sm_target; no network repair needed"
-            return 0
-        fi
-        sm_log_err "found a local previous binary at $_sm_backup but could not promote it to $_sm_target"
+    if ! sm_looks_like_sha256 "$_sm_expected_hash"; then
+        sm_log_err "refusing local repair of $_sm_target: no valid recorded sha256 to verify a candidate against"
+        return 1
     fi
 
-    if [ -f "$_sm_staging" ] && sm_verify_mode "$_sm_staging" 755 2>/dev/null; then
-        if sm_atomic_rename "$_sm_staging" "$_sm_target"; then
-            sm_log "promoted local staged binary at $_sm_staging to $_sm_target; no network repair needed"
+    for _sm_candidate in "$_sm_backup" "$_sm_staging"; do
+        if [ ! -f "$_sm_candidate" ] || ! sm_verify_mode "$_sm_candidate" 755 2>/dev/null; then
+            continue
+        fi
+
+        _sm_candidate_hash=$(sm_sha256_of "$_sm_candidate" 2>/dev/null)
+        if [ "$_sm_candidate_hash" != "$_sm_expected_hash" ]; then
+            sm_log_err "local candidate $_sm_candidate does not match the sha256 recorded at the last successful activation; discarding it rather than promoting an unverified binary"
+            "$_sm_rm" -f "$_sm_candidate"
+            continue
+        fi
+
+        if sm_atomic_rename "$_sm_candidate" "$_sm_target"; then
+            sm_log "promoted verified local binary at $_sm_candidate to $_sm_target; no network repair needed"
             return 0
         fi
-        sm_log_err "found a local staged binary at $_sm_staging but could not promote it to $_sm_target"
-    fi
+        sm_log_err "found a verified local binary at $_sm_candidate but could not promote it to $_sm_target"
+    done
 
     return 1
 }

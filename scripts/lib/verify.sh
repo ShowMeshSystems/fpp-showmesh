@@ -85,6 +85,32 @@ sm_verify_checksum() {
     return 0
 }
 
+# True if $1 is exactly 64 lowercase hex characters and nothing else,
+# including no embedded newline. Glob/case matching, unlike grep, applies
+# to the whole value at once rather than line by line, which is what makes
+# this safe against a multi-line argument that merely contains one valid
+# hex line among other content; see sm_verify_sha256 below for the bug
+# this closes.
+sm_looks_like_sha256() {
+    local _sm_value
+    _sm_value="$1"
+    case "$_sm_value" in
+        *[!0-9a-f]*|"")
+            return 1
+            ;;
+    esac
+    [ "${#_sm_value}" -eq 64 ]
+}
+
+# Prints the sha256 of $1, absolute-path tool resolution included.
+sm_sha256_of() {
+    local _sm_path _sm_sha256sum _sm_awk
+    _sm_path="$1"
+    _sm_sha256sum=$(sm_resolve_bin sha256sum /usr/bin/sha256sum /bin/sha256sum /sbin/sha256sum) || return 1
+    _sm_awk=$(sm_resolve_bin awk /usr/bin/awk /bin/awk) || return 1
+    "$_sm_sha256sum" "$_sm_path" | "$_sm_awk" '{print $1}'
+}
+
 # Computes the actual sha256 of $1 (a downloaded file) and compares it to
 # $2, an already-trusted expected hash. Unlike sm_verify_checksum above,
 # this never reads a manifest fetched from the same host as the file it is
@@ -100,7 +126,7 @@ sm_verify_checksum() {
 # closed on its own, not depend on `sha256sum` never coincidentally
 # producing the same malformed string.
 sm_verify_sha256() {
-    local _sm_path _sm_expected _sm_grep _sm_sha256sum _sm_awk _sm_actual
+    local _sm_path _sm_expected _sm_actual
     _sm_path="$1"
     _sm_expected="$2"
 
@@ -109,16 +135,12 @@ sm_verify_sha256() {
         return 1
     fi
 
-    _sm_grep=$(sm_resolve_bin grep /usr/bin/grep /bin/grep) || return 1
-    if ! printf '%s' "$_sm_expected" | "$_sm_grep" -Eq '^[0-9a-f]{64}$'; then
+    if ! sm_looks_like_sha256 "$_sm_expected"; then
         sm_log_err "refusing to verify $_sm_path: expected-hash argument is not a non-empty 64-character hex string"
         return 1
     fi
 
-    _sm_sha256sum=$(sm_resolve_bin sha256sum /usr/bin/sha256sum /bin/sha256sum /sbin/sha256sum) || return 1
-    _sm_awk=$(sm_resolve_bin awk /usr/bin/awk /bin/awk) || return 1
-
-    _sm_actual=$("$_sm_sha256sum" "$_sm_path" | "$_sm_awk" '{print $1}')
+    _sm_actual=$(sm_sha256_of "$_sm_path") || return 1
 
     if [ "$_sm_actual" != "$_sm_expected" ]; then
         sm_log_err "checksum mismatch for $_sm_path: expected $_sm_expected (from artifacts.lock.json), got $_sm_actual"

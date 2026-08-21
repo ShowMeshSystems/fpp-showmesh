@@ -209,11 +209,22 @@ sm_arch_repair_reason() {
     _sm_fppdir="$2"
 
     _sm_stamp=$(sm_arch_stamp_path "$_sm_plugin_dir")
-    _sm_stamped_arch=""
-    if [ -f "$_sm_stamp" ]; then
-        _sm_stamped_arch=$(cat "$_sm_stamp" 2>/dev/null)
+    if [ ! -f "$_sm_stamp" ]; then
+        # No stamp at all: most likely a binary installed by a version of
+        # this repository before the stamp existed. Nothing to compare
+        # against, so this is not evidence of a mismatch.
+        return 0
     fi
+
+    _sm_stamped_arch=$(sm_read_stamp "$_sm_stamp")
     if [ -z "$_sm_stamped_arch" ]; then
+        # The stamp file EXISTS but is empty, unlike the no-file case
+        # above: exactly what a crash during a non-atomic stamp write used
+        # to leave behind, or a filesystem that quietly truncated one. An
+        # existing binary next to an unreadable stamp is treated as
+        # needing repair rather than as health, so this guard cannot be
+        # blinded by the same failure it exists to catch.
+        printf 'architecture stamp at %s exists but is empty; cannot confirm the installed binary'"'"'s architecture\n' "$_sm_stamp"
         return 0
     fi
 
