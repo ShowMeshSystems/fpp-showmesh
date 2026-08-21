@@ -1009,6 +1009,14 @@ echo "== stage-then-swap activation =="
 SM_INSTALL_OWNER="$(id -un):$(id -gn)"
 export SM_INSTALL_OWNER
 
+# sm_ensure_scaffold_stage_dir's own chown targets root:root by default,
+# which this suite's unprivileged user cannot set either (and running as
+# root, per the gate this project requires, would trivially chown to the
+# real root:root anyway with nothing left to override). Same pattern as
+# SM_INSTALL_OWNER above.
+SM_SCAFFOLD_STAGE_OWNER="$(id -un):$(id -gn)"
+export SM_SCAFFOLD_STAGE_OWNER
+
 _sm_actdir="$_sm_tmp/activate"
 mkdir -p "$_sm_actdir"
 
@@ -1665,6 +1673,123 @@ else
         assert_failure "sm_scaffold_file refuses a FIFO at its own path rather than blocking on it" "$status"
     fi
     assert_eq "the FIFO is left exactly as it was, not chowned/chmoded" "fifo" "$( [ -p "$_sm_scaf_fifo_path" ] && echo fifo )"
+fi
+
+echo "== staging root location invariant =="
+
+# The suite exports SM_SCAFFOLD_STAGE_ROOT at the top of this section and
+# never unsets it, so nothing above ever exercises the real default this
+# repository ships. This is the one place that does: a subshell resolves
+# sm_scaffold_stage_root() with the override unset, so what it prints is
+# actually the default a real install would use, not the tmp path this
+# suite substitutes for it everywhere else.
+_sm_stage_default=$(unset SM_SCAFFOLD_STAGE_ROOT; sm_scaffold_stage_root)
+_sm_cred_default=$(sm_credential_dir)
+_sm_state_default=$(sm_state_dir)
+
+# The whole point of the private staging root (see common.sh's header on
+# sm_scaffold_stage_root) is that neither sm_credential_dir nor
+# sm_state_dir, both fpp-owned, can be its parent: a descendant of either
+# would inherit an fpp-writable ancestor able to replace the staging
+# directory wholesale regardless of its own mode.
+case "$_sm_stage_default" in
+    "$_sm_cred_default"/*|"$_sm_cred_default")
+        fail "the default staging root is not a descendant of the credential directory" "stage root: $_sm_stage_default, credential dir: $_sm_cred_default"
+        ;;
+    *)
+        pass "the default staging root is not a descendant of the credential directory"
+        ;;
+esac
+case "$_sm_stage_default" in
+    "$_sm_state_default"/*|"$_sm_state_default")
+        fail "the default staging root is not a descendant of the state directory" "stage root: $_sm_stage_default, state dir: $_sm_state_default"
+        ;;
+    *)
+        pass "the default staging root is not a descendant of the state directory"
+        ;;
+esac
+assert_eq "the default staging root is the documented /etc path" "/etc/showmesh-fpp-plugin.stage" "$_sm_stage_default"
+
+echo "== sm_ensure_scaffold_stage_dir ownership reassertion =="
+
+# sm_mkdir_p_refuse_symlinks only CREATES a missing directory; it never
+# touches one that already exists. Before this fix, that meant a staging
+# root pre-planted by "fpp" (the only non-root actor able to reach this
+# path's parent before the directory exists) kept whatever ownership it
+# already had: sm_ensure_scaffold_stage_dir chmoded it 0700 and reported
+# success without ever reasserting ownership. Simulated here by
+# pre-creating the staging root before calling the function, then proving
+# a chown actually runs against it regardless: shadowing chown to log its
+# invocations, the same wrapper technique the stage-then-swap TOCTOU proof
+# above uses, rather than trying to observe a real ownership change this
+# suite's single unprivileged user cannot produce.
+_sm_reassert_dir="$_sm_tmp/stage-reassert"
+mkdir -p "$_sm_reassert_dir/fake-bin"
+_sm_reassert_log="$_sm_reassert_dir/chown-calls.log"
+: > "$_sm_reassert_log"
+cat > "$_sm_reassert_dir/fake-bin/chown" <<FAKE
+#!/bin/sh
+printf '%s\n' "\$*" >> "$_sm_reassert_log"
+exec chown "\$@"
+FAKE
+chmod 0755 "$_sm_reassert_dir/fake-bin/chown"
+
+sm_resolve_bin() {
+    case "$1" in
+        chown) printf '%s\n' "$_sm_reassert_dir/fake-bin/chown"; return 0 ;;
+    esac
+    _sm_reassert_name="$1"
+    shift
+    for _sm_reassert_candidate in "$@"; do
+        if [ -x "$_sm_reassert_candidate" ]; then
+            printf '%s\n' "$_sm_reassert_candidate"
+            return 0
+        fi
+    done
+    sm_log_err "required tool not found: $_sm_reassert_name (checked: $*)"
+    return 1
+}
+
+_sm_preexisting_stage="$_sm_scafdir/preexisting-stage-root"
+mkdir -p "$_sm_preexisting_stage"
+chmod 0755 "$_sm_preexisting_stage"
+
+# Run in-process, not in a forked `sh -c`: a child process would re-source
+# common.sh fresh and get the REAL sm_resolve_bin back, silently defeating
+# the shadow just installed above.
+_sm_reassert_saved_root="${SM_SCAFFOLD_STAGE_ROOT-}"
+SM_SCAFFOLD_STAGE_ROOT="$_sm_preexisting_stage"
+export SM_SCAFFOLD_STAGE_ROOT
+sm_ensure_scaffold_stage_dir
+status=$?
+SM_SCAFFOLD_STAGE_ROOT="$_sm_reassert_saved_root"
+export SM_SCAFFOLD_STAGE_ROOT
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/common.sh"
+
+assert_success "sm_ensure_scaffold_stage_dir succeeds against a pre-existing staging root" "$status"
+if grep -F "$_sm_preexisting_stage" "$_sm_reassert_log" >/dev/null 2>&1; then
+    pass "a pre-existing staging root still gets its ownership reasserted, not just chmoded"
+else
+    fail "a pre-existing staging root still gets its ownership reasserted, not just chmoded" "chown log is empty for $_sm_preexisting_stage:
+$(cat "$_sm_reassert_log")"
+fi
+
+echo "== no /proc dependency remains =="
+
+# sm_scaffold_activate_cross_device (the EXDEV fallback that set
+# attributes through /proc/self/fd rather than by path) was dead code:
+# GNU mv already catches EXDEV internally and falls back to a copy for a
+# regular file, so the fallback's own marker never printed even under a
+# forced, confirmed EXDEV. It has been deleted along with every /proc
+# reference that came with it. This asserts the deletion was total,
+# rather than only removing the function's own definition and leaving a
+# caller or a comment still depending on procfs being mounted.
+_sm_proc_hits=$(grep -rl '/proc' "$_sm_lib_dir" 2>/dev/null || true)
+if [ -z "$_sm_proc_hits" ]; then
+    pass "no file under scripts/lib references /proc; the cross-device fallback's procfs dependency is gone, not just its function"
+else
+    fail "no file under scripts/lib references /proc; the cross-device fallback's procfs dependency is gone, not just its function" "$_sm_proc_hits"
 fi
 
 echo "== sm_create_new_file (noclobber) =="

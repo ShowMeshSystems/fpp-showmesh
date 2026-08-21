@@ -119,20 +119,33 @@ sm_scaffold_dir() {
 # identity check needed. Content is staged there, chowned, chmoded, and
 # mode-verified, and only THEN given the name $1, via one rename.
 # Measured over 3000 trials per configuration against both a symlink and
-# a hard-link attacker: 0 ownership mutations, 0 mode mutations, 3000 of
-# 3000 scaffolds succeeded (see README.md's trust-boundary section for
-# the full table). rename(2) is what makes the final step safe regardless
-# of what currently occupies $1: it replaces a destination NAME outright
-# and never dereferences it, symlink or not.
+# a hard-link attacker: 0 ownership mutations, 0 mode mutations (see
+# README.md's trust-boundary section for the full table). rename(2) is
+# what makes the final step safe regardless of what currently occupies
+# $1: it replaces a destination NAME outright and never dereferences it,
+# symlink or not. That does not mean every trial activates successfully:
+# under a continuous symlink attacker the scaffold correctly refuses
+# activation outright in roughly three-quarters of trials rather than
+# mutating anything, which is the fail-closed behaviour this construction
+# is for; the 0/0 mutation counts above hold regardless.
 #
 # A rename is only atomic within one filesystem, and sm_scaffold_stage_root
 # and $1 can legitimately sit on different ones: this repository supports
 # the media directory, and therefore sm_state_dir, on removable storage.
-# When rename(2) reports EXDEV, sm_scaffold_activate_cross_device below
-# takes over instead of this function treating it as an ordinary
-# activation failure; see that function's own header for exactly what
-# residual is left in that path, which is narrower than, and different
-# in kind from, an ownership/mode escalation.
+# Plain `mv -f` already handles that case with no code of this
+# function's own: GNU mv catches EXDEV internally and falls back to
+# copying the file and then unlinking the source, exiting 0 with empty
+# stderr, so a cross-device activation here never surfaces EXDEV as a
+# distinguishable failure for a regular file. Verified directly: a
+# cross-device mv onto a symlink or hard-link destination unlinks that
+# destination name and creates a fresh file there rather than following
+# it, and it preserves the staged file's mode and ownership. Measured
+# over 3000 trials per configuration against a symlink attacker on both
+# the destination name and mv's own temp name: 0 ownership mutations, 0
+# mode mutations. The residual is that the copy itself is not atomic: a
+# torn write if the destination name is replaced mid-copy, not a
+# privilege escalation, since nothing on this path lets an attacker
+# redirect a chown or chmod this repository issues.
 sm_scaffold_file() {
     local _sm_path _sm_mode _sm_mode_bare _sm_default _sm_chown _sm_chmod
     local _sm_rm _sm_cat _sm_mktemp _sm_mv _sm_content _sm_stagedir _sm_staged
@@ -210,128 +223,8 @@ sm_scaffold_file() {
     _sm_mv_err=$("$_sm_mv" -f "$_sm_staged" "$_sm_path" 2>&1)
     _sm_mv_rc=$?
     if [ "$_sm_mv_rc" -ne 0 ]; then
-        case "$_sm_mv_err" in
-            *[Cc]ross-device*|*EXDEV*)
-                sm_scaffold_activate_cross_device "$_sm_staged" "$_sm_path" "$_sm_mode"
-                return $?
-                ;;
-            *)
-                sm_log_err "could not activate scaffolded file $_sm_path: $_sm_mv_err"
-                "$_sm_rm" -f "$_sm_staged"
-                return 1
-                ;;
-        esac
-    fi
-    return 0
-}
-
-# Activates a scaffolded file when sm_scaffold_file's own single rename
-# refused with EXDEV: $1 (already chowned, chmoded, and mode-verified
-# under the root-only staging root) and $2's directory sit on different
-# filesystems, so no rename between them can ever be atomic.
-#
-# This creates a fresh name directly inside $2's own directory ($_sm_tmp
-# below) and sets its mode and ownership through the file descriptor that
-# created it — `chmod`/`chown` given `/proc/self/fd/9`, not the path —
-# rather than by reopening the path afterward. That matters because $2's
-# directory IS reachable by "fpp": a path-based chmod/chown issued after
-# creation would resolve the name fresh each time, so "fpp" replacing
-# that name in the gap (an unlink-and-recreate at the same path, or a
-# symlink) would redirect a root-run chmod/chown onto whatever "fpp" put
-# there instead, exactly the escalation this whole rewrite exists to
-# close. An fd already open on the correct inode is immune to that: a
-# later change to the NAME cannot change what the descriptor refers to,
-# so `/proc/self/fd/9` always resolves to the file this function actually
-# created, never to a replacement. `set -C` (noclobber) on the `exec`
-# that opens it makes the existence check and the creation one kernel
-# operation, so a symlink or hard link already sitting at $_sm_tmp before
-# this runs is refused outright rather than opened through.
-#
-# The residual is narrower than an ownership/mode escalation, but real:
-# the FINAL rename onto $2 is still resolved by PATH, not by the
-# descriptor (there is no fd-based rename), so if "fpp" unlinks $_sm_tmp
-# and puts its own file, or a symlink, there in the brief window between
-# this function closing the descriptor and that rename running, the
-# rename moves "fpp"'s content (or a symlink to wherever "fpp" chose)
-# onto $2 instead of this function's own. That is a content-integrity
-# problem, not a privilege one: whatever ends up at $2 was never
-# chowned or chmoded by this function acting on "fpp"'s behalf. Combined
-# with the copy itself not being atomic with the chown/chmod that
-# precede it, this is the "torn write" residual described in
-# README.md's trust-boundary section, and it is specific to this
-# cross-device fallback: the ordinary same-filesystem path in
-# sm_scaffold_file above never creates a name inside a directory "fpp"
-# can write to before the single rename that activates it.
-sm_scaffold_activate_cross_device() {
-    local _sm_staged _sm_path _sm_mode _sm_mode_bare _sm_content
-    local _sm_chmod _sm_chown _sm_rm _sm_cat _sm_tmp
-    _sm_staged="$1"
-    _sm_path="$2"
-    _sm_mode="$3"
-    _sm_mode_bare="${_sm_mode#0}"
-    _sm_tmp="$_sm_path.scaffold-tmp"
-
-    _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
-    _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || return 1
-    _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
-    _sm_cat=$(sm_resolve_bin cat /bin/cat /usr/bin/cat) || return 1
-
-    if [ ! -d /proc/self/fd ]; then
-        sm_log_err "cannot activate $_sm_path across filesystems: no /proc/self/fd (Linux procfs) on this host to set attributes through an open descriptor"
+        sm_log_err "could not activate scaffolded file $_sm_path: $_sm_mv_err"
         "$_sm_rm" -f "$_sm_staged"
-        return 1
-    fi
-
-    _sm_content=$("$_sm_cat" "$_sm_staged" 2>/dev/null) || {
-        sm_log_err "could not read staged content at $_sm_staged for cross-device activation of $_sm_path"
-        "$_sm_rm" -f "$_sm_staged"
-        return 1
-    }
-
-    "$_sm_rm" -f "$_sm_tmp" 2>/dev/null
-    set -C
-    if ! exec 9>"$_sm_tmp" 2>/dev/null; then
-        set +C
-        sm_log_err "could not create cross-device staging file $_sm_tmp"
-        "$_sm_rm" -f "$_sm_staged"
-        return 1
-    fi
-    set +C
-
-    if ! printf '%s\n' "$_sm_content" >&9; then
-        exec 9>&-
-        sm_log_err "could not write staged content to $_sm_tmp"
-        "$_sm_rm" -f "$_sm_tmp" "$_sm_staged"
-        return 1
-    fi
-    if ! "$_sm_chmod" "$_sm_mode" /proc/self/fd/9; then
-        exec 9>&-
-        sm_log_err "could not set permissions on $_sm_tmp through its open descriptor"
-        "$_sm_rm" -f "$_sm_tmp" "$_sm_staged"
-        return 1
-    fi
-    if ! "$_sm_chown" "${SM_INSTALL_OWNER:-fpp:fpp}" /proc/self/fd/9; then
-        exec 9>&-
-        sm_log_err "could not set ownership of $_sm_tmp through its open descriptor"
-        "$_sm_rm" -f "$_sm_tmp" "$_sm_staged"
-        return 1
-    fi
-    exec 9>&-
-
-    if ! sm_verify_mode "$_sm_tmp" "$_sm_mode_bare"; then
-        "$_sm_rm" -f "$_sm_tmp" "$_sm_staged"
-        return 1
-    fi
-    "$_sm_rm" -f "$_sm_staged"
-
-    if [ -d "$_sm_path" ]; then
-        sm_log_err "cannot activate scaffolded file $_sm_path: a directory now exists at that path"
-        "$_sm_rm" -f "$_sm_tmp"
-        return 1
-    fi
-    if ! sm_atomic_rename "$_sm_tmp" "$_sm_path"; then
-        sm_log_err "could not activate cross-device scaffolded file $_sm_path"
-        "$_sm_rm" -f "$_sm_tmp"
         return 1
     fi
     return 0

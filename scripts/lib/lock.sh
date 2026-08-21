@@ -13,8 +13,18 @@
 # this script), not over curl, so it is the one hash source a compromised
 # download host cannot also serve.
 #
-# A missing, malformed, or version-mismatched lock refuses the install
-# outright; there is no fallback to an unpinned hash.
+# A missing lock, a lock pinned to a different version, or several
+# specific malformed shapes within one artifact entry (no "filename"
+# match, no "sha256" field, "sha256" before "filename", more than one
+# "sha256" occurrence in the entry, an empty or non-hex "sha256" value,
+# or more than one entry naming the same filename) all refuse the
+# install outright, with no fallback to an unpinned hash. This is not a
+# JSON parser, and not every malformed payload is caught: an artifact
+# object closed early by a stray, unescaped brace inside a string value,
+# or a file truncated mid-object, can still make this grep/sed-based
+# reader return a hash read from OUTSIDE the object that named the
+# requested filename, at exit 0. See sm_lock_sha256 below for exactly
+# what shape of malformed input is refused and what shape is not.
 #
 # Requires scripts/lib/common.sh to already be sourced.
 
@@ -220,7 +230,10 @@ sm_lock_sha256() {
 
 # $1 = plugin directory, $2 = version being installed, $3 = exact tarball
 # filename to verify. Refuses rather than falling back if the lock file is
-# missing, malformed, or pinned to a version other than $2.
+# missing or pinned to a version other than $2, and refuses several
+# specific malformed shapes within the matching artifact entry (see
+# sm_lock_sha256 above); it is not a full JSON parser, and a malformed
+# lock outside those specific shapes is not guaranteed to be refused.
 sm_lock_expected_sha256() {
     local _sm_plugin_dir _sm_version _sm_filename _sm_lock_file _sm_lock_version
     _sm_plugin_dir="$1"

@@ -50,9 +50,18 @@ manifest.** `artifacts.lock.json`, committed at this repository's own
 root, is the trust anchor: for the pinned `VERSION`, it records each
 tarball's exact filename and expected SHA-256, and the installer refuses
 to install anything whose downloaded bytes do not match the lock entry
-for that exact filename; a missing, malformed, or version-mismatched
-lock refuses the install outright rather than falling back to anything
-else. This is a deliberate change from checking a `SHA256SUMS` manifest
+for that exact filename; a missing lock, a version-mismatched lock, or
+several specific malformed shapes within the matching artifact entry
+(no match for the requested filename, a missing or misordered "sha256"
+field, more than one "sha256" occurrence, an empty or non-hex hash
+value, or more than one entry naming the same filename) all refuse the
+install outright rather than falling back to anything else. The lookup
+is a grep/sed reader, not a full JSON parser, and a malformed lock
+outside those specific shapes is not guaranteed to be refused: an
+artifact object closed early by a stray brace, or a truncated file, can
+still return a hash read from outside the intended object at exit 0;
+see `scripts/lib/lock.sh` for exactly what is and is not caught. This is
+a deliberate change from checking a `SHA256SUMS` manifest
 fetched from the same base URL as the tarball: that manifest and the
 tarball both arrive over the same connection, so a compromised or
 redirected host can make them agree with each other regardless of what
@@ -150,7 +159,8 @@ commands/
 scripts/
   fpp_install.sh             validate, fetch, verify, and place the binary; scaffold local state
   fpp_upgrade.sh             additive: same core as install, honored by FPP 10 only
-  fpp_uninstall.sh           removes everything this plugin created outside its own directory
+  fpp_uninstall.sh           removes the credential, state, and scaffold-staging directories this
+                              plugin created outside its own directory
   preStart.sh                cheap repair check at fppd startup; a no-op in the common case
   lib/
     common.sh                 absolute-path tool resolution, logging, shared paths, mode/owner verification
@@ -194,9 +204,12 @@ test/
   so this script is purely additive.
 - **`fpp_uninstall.sh`** — FPP deletes the plugin directory itself
   regardless of what this script returns, so this script's only job is
-  everything outside that directory. That is now **two** separate
-  locations, not one (see "Paths" below for why they are split): the
-  credential directory and the non-secret state directory. Idempotent; a
+  everything outside that directory. That is **three** separate
+  locations, not one (see "Paths" below for why the first two are
+  split): the credential directory, the non-secret state directory, and
+  the root-only scaffold staging directory
+  (`sm_scaffold_stage_root()`) that install/upgrade/repair creates under
+  `/etc` and nothing else on the host ever cleans up. Idempotent; a
   second run, or a run against a host where install never completed,
   exits `0`.
 - **`preStart.sh`** — runs at every `fppd` start, and its two checks are
@@ -309,6 +322,13 @@ FPP's tree entirely.
   records which architecture was actually fetched, so `preStart.sh` can
   compare a fresh detection against it (see above). Gitignored, like the
   binary itself.
+- **Scaffold staging directory:** `/etc/showmesh-fpp-plugin.stage`, mode
+  `0700`, owned `root:root` — a third location outside the plugin
+  directory, not a sibling of either directory above and never chowned
+  to `fpp:fpp`; every credential and state file is prepared inside it
+  before being renamed into place (see the trust-boundary section
+  below). `fpp_uninstall.sh` removes it along with the credential and
+  state directories.
 
 Every `chown` and `chmod` in the scaffold is checked, and every `chmod` is
 followed by reading the mode back rather than trusting the exit code
@@ -517,38 +537,69 @@ any FPP host involved:
   default, so the identity check's two reads always agreed with each
   other regardless of what the symlink pointed to. The current
   construction, measured the same way against both attacks: 0 ownership
-  mutations, 0 mode mutations, 3000 of 3000 scaffolds succeeded. What
-  makes the final step safe regardless of timing is `rename(2)` itself:
-  it replaces a destination NAME outright and never dereferences a
-  symlink or hard link already sitting there, so the swap is safe no
-  matter what currently occupies the scaffold file's own path. A
-  directory (or anything else that is not a regular file) sitting at a
-  scaffold file's own path is refused rather than chowned, chmoded, and
-  reported healthy.
+  mutations, 0 mode mutations. That does not mean every trial activates:
+  under a continuous symlink attacker the scaffold correctly refuses
+  activation outright in roughly 75 percent of trials rather than
+  mutating anything, which is the fail-closed behavior this construction
+  is for, not a shortfall — the attacker in that configuration never
+  touches a path this construction actually checks, so the safety
+  figures above stand on their own regardless of how often activation
+  itself succeeds. What makes the final step safe regardless of timing
+  is `rename(2)` itself: it replaces a destination NAME outright and
+  never dereferences a symlink or hard link already sitting there, so
+  the swap is safe no matter what currently occupies the scaffold file's
+  own path. A directory (or anything else that is not a regular file)
+  sitting at a scaffold file's own path is refused rather than chowned,
+  chmoded, and reported healthy.
+
+  `sm_scaffold_dir`'s own chmod, unlike `sm_scaffold_file`'s, is still
+  issued by PATH rather than through the private staging construction
+  above: a directory scaffold must not disturb a directory that already
+  exists at that path (a re-run must never touch an already-populated
+  state directory), and `rename(2)` onto a non-empty destination fails
+  outright, so the stage-then-rename swap that closes the file case does
+  not carry over to a directory that may already hold content. This is
+  pre-existing, not introduced by this branch. `chown -h` immediately
+  above closes the ownership half of the same race by acting on the
+  symlink itself via `lchown(2)`; there is no `lchmod(2)` on Linux, so
+  the repeated `sm_refuse_symlink` check immediately before the chmod
+  call is the only defense available for that step, and it is a
+  check-then-act gap, not a closed one. A reviewer raced a symlink into
+  that gap and got a root `chmod 0700` applied to a directory outside
+  this repository's tree in 98 of 2000 trials; ownership was untouched
+  in every trial, since `chown -h` holds. Closing this the way
+  `sm_scaffold_file`'s chmod was closed is not available here without
+  changing what a re-run is allowed to do to an existing directory's
+  contents, so it stands documented rather than fixed in this commit.
 
   A rename is only atomic within one filesystem, and the staging root
   and a scaffold file's own target can legitimately be on different ones,
   since this repository supports the media directory (and therefore
-  `sm_state_dir`) on removable storage. When `rename(2)` reports `EXDEV`,
-  `sm_scaffold_activate_cross_device` (`install-core.sh`) takes over: it
-  creates the file directly inside the target's own directory (which
-  `fpp` CAN reach) and sets its mode and ownership through the file
-  descriptor that created it — `chmod`/`chown` against `/proc/self/fd`,
-  not the path — so a later swap of that path's name cannot redirect
-  them. Tested clean for privilege this way, over 3000 trials with the
-  target directory bound to a separate filesystem to force `EXDEV`: 0
-  ownership mutations, 0 mode mutations. The residual specific to this
-  fallback, and only this fallback, is narrower than an
-  ownership/mode escalation: the FINAL rename onto the real target is
-  still resolved by path, not by the descriptor, so a swap of the
-  intermediate name in the brief window between the descriptor closing
-  and that rename can substitute `fpp`'s own content, or a symlink to
-  wherever `fpp` chooses, for the scaffolded content — a torn, non-atomic
-  write, and a content-integrity problem, not a privilege one, since no
-  chmod or chown this repository runs is ever redirected by it. This has
-  been exercised only in a container with a bind-mounted tmpfs standing
-  in for removable media, never against real removable storage on an FPP
-  host.
+  `sm_state_dir`) on removable storage. No code in this repository
+  handles that case specially any more: plain `mv -f` already does, on
+  its own. GNU `mv` catches `EXDEV` internally and falls back to copying
+  the file and then unlinking the source, exiting 0 with empty stderr,
+  so `sm_scaffold_file`'s single `mv -f` never surfaces `EXDEV` as a
+  distinguishable failure for a regular file — an earlier version of
+  this repository added `sm_scaffold_activate_cross_device` to handle
+  that case explicitly, instrumented it with a marker, forced a genuine
+  cross-device pair confirmed by `rename(2)` itself returning `EXDEV`,
+  and the marker never printed; no test in this suite ever referenced
+  that function, `EXDEV`, or cross-device activation either. It was dead
+  code, and has been removed. Verified directly instead: a cross-device
+  `mv` onto a symlink or hard-link destination unlinks that destination
+  name and creates a fresh file there rather than following it, and it
+  preserves the staged file's mode and ownership. Measured over 3000
+  trials per configuration against a symlink attacker on both the
+  destination name and `mv`'s own temp name: 0 ownership mutations, 0
+  mode mutations. The residual is that the copy itself is not atomic: a
+  torn write if the destination name is replaced mid-copy, not a
+  privilege escalation, since nothing on this path lets an attacker
+  redirect a chown or chmod this repository issues (`mv` performs its
+  own attribute preservation on this path, not a chown/chmod this
+  repository runs). This has been exercised only in a container with a
+  bind-mounted tmpfs standing in for removable media, never against real
+  removable storage on an FPP host.
 - `sm_install_binary` and `sm_install_or_upgrade`, end to end, with
   `sm_detect_arch` and `sm_download` shadowed so nothing here touches the
   network: a clean fresh install; a lock hash that disagrees with the

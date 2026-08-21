@@ -333,22 +333,43 @@ sm_mkdir_p_refuse_symlinks() {
     return 0
 }
 
-# Ensures sm_scaffold_stage_root() exists, mode 0700, and is never chowned
-# to fpp:fpp. This deliberately does NOT use sm_scaffold_dir: that
+# Ensures sm_scaffold_stage_root() exists, mode 0700, and owned
+# root:root. This deliberately does NOT use sm_scaffold_dir: that
 # function's whole job is to hand a directory over to fpp:fpp, which is
 # exactly what this directory must never be. Every path component is
 # walked and refused-if-symlink by sm_mkdir_p_refuse_symlinks first, the
 # same defence sm_scaffold_dir itself relies on, then the leaf is
-# re-checked and chmoded. There is no chown here at all: whoever creates
-# this directory (root, on every real install/upgrade/repair) is already
-# the only owner it will ever have.
+# re-checked, chowned, and chmoded.
+#
+# The chown is not optional: sm_mkdir_p_refuse_symlinks only creates a
+# missing directory, it does not touch one that is already there, so
+# before this chown existed, a directory pre-planted at this path and
+# already owned fpp:fpp (by "fpp", the only non-root actor who can ever
+# reach this path's parent before it exists) was accepted here at exit
+# 0, chmoded 0700, and handed back as though it were the root-only
+# staging root sm_scaffold_file's own chown/chmod calls rely on having
+# no other writer than root. Chowning it to root:root on every call
+# closes that: an existing fpp-owned directory is reclaimed to root
+# before anything is staged inside it, the same way sm_scaffold_dir's
+# own `chown -h` reasserts ownership on every call rather than trusting
+# whatever ownership a pre-existing path happened to have. Overridable
+# via SM_SCAFFOLD_STAGE_OWNER (the same pattern SM_INSTALL_OWNER uses)
+# so this repository's own tests can exercise a real, successful chown
+# without a "root" distinct from the user running them; production code
+# never sets it and gets the real root:root target.
 sm_ensure_scaffold_stage_dir() {
-    local _sm_dir _sm_chmod
+    local _sm_dir _sm_chmod _sm_chown
     _sm_dir=$(sm_scaffold_stage_root)
     _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
+    _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || return 1
 
     sm_refuse_symlink "$_sm_dir" || return 1
     sm_mkdir_p_refuse_symlinks "$_sm_dir" || return 1
+    sm_refuse_symlink "$_sm_dir" || return 1
+    "$_sm_chown" -h "${SM_SCAFFOLD_STAGE_OWNER:-root:root}" "$_sm_dir" || {
+        sm_log_err "could not set ownership of staging directory $_sm_dir to ${SM_SCAFFOLD_STAGE_OWNER:-root:root}"
+        return 1
+    }
     sm_refuse_symlink "$_sm_dir" || return 1
     "$_sm_chmod" 0700 "$_sm_dir" || {
         sm_log_err "could not set permissions on staging directory $_sm_dir"
