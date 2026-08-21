@@ -10,6 +10,11 @@
 # script must not touch the plugin directory itself; FPP owns removing
 # that, and this script is still running from inside it while it executes.
 #
+# Also removes the root-only scaffold staging directory
+# (sm_scaffold_stage_root() in lib/common.sh), a third location outside
+# the plugin directory that install/upgrade/repair creates and that
+# nothing else on the host ever cleans up.
+#
 # Must be idempotent — a second run, or a run against a host where install
 # never completed, must exit 0 rather than error.
 #
@@ -20,9 +25,13 @@ _sm_script_dir=$(cd "$(dirname "$0")" && pwd)
 
 _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || {
     # Even tool resolution failing must not block removal from being
-    # attempted; fall through and let the shell's builtin behavior of a
-    # missing command surface below rather than aborting outright.
-    _sm_rm=rm
+    # attempted; fall through to the same absolute-path candidate
+    # sm_resolve_bin itself checks first, rather than a bare "rm" that
+    # depends on a PATH none of this repository's invocation conventions
+    # guarantee (see common.sh's header). If /bin/rm genuinely is not
+    # there either, the invocation below fails loudly with a normal
+    # "command not found" instead of silently no-oping.
+    _sm_rm=/bin/rm
 }
 
 _sm_creddir=$(sm_credential_dir)
@@ -39,6 +48,14 @@ if [ -e "$_sm_statedir" ]; then
     "$_sm_rm" -rf "$_sm_statedir"
 else
     sm_log "no plugin state directory at $_sm_statedir; nothing to remove"
+fi
+
+_sm_stagedir=$(sm_scaffold_stage_root)
+if [ -e "$_sm_stagedir" ]; then
+    sm_log "removing scaffold staging directory $_sm_stagedir"
+    "$_sm_rm" -rf "$_sm_stagedir"
+else
+    sm_log "no scaffold staging directory at $_sm_stagedir; nothing to remove"
 fi
 
 sm_log "uninstall complete"

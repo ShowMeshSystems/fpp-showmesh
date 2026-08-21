@@ -44,7 +44,7 @@ _sm_fppdir=$(sm_fppdir "${FPPDIR:-}")
 if [ ! -x "$_sm_binary" ]; then
     _sm_repair_reason="binary missing or not executable at $_sm_binary"
 else
-    # sm_arch_repair_reason is the testable form of this comparison — see
+    # sm_arch_repair_reason is the testable form of this comparison; see
     # its comment in lib/arch.sh for why it is a function and not left
     # inline here.
     _sm_repair_reason=$(sm_arch_repair_reason "$_sm_plugin_dir" "$_sm_fppdir")
@@ -58,9 +58,14 @@ fi
 
 sm_log "repair needed: $_sm_repair_reason"
 
-. "$_sm_script_dir/lib/fetch.sh"
+# install-core.sh's own dependencies (verify.sh, fetch.sh, commands.sh,
+# lock.sh, activate.sh) sourced before the network repair below, since
+# they are only function definitions and local file reads.
 . "$_sm_script_dir/lib/verify.sh"
+. "$_sm_script_dir/lib/fetch.sh"
 . "$_sm_script_dir/lib/commands.sh"
+. "$_sm_script_dir/lib/lock.sh"
+. "$_sm_script_dir/lib/activate.sh"
 . "$_sm_script_dir/lib/install-core.sh"
 
 _sm_version_file="$_sm_plugin_dir/VERSION"
@@ -68,7 +73,8 @@ if [ ! -f "$_sm_version_file" ]; then
     sm_log_err "VERSION file missing from plugin directory: $_sm_version_file; cannot repair"
     exit 1
 fi
-_sm_version=$(tr -d ' \t\r\n' < "$_sm_version_file")
+_sm_tr=$(sm_resolve_bin tr /usr/bin/tr /bin/tr) || exit 1
+_sm_version=$("$_sm_tr" -d ' \t\r\n' < "$_sm_version_file")
 
 # A much tighter network budget than a foreground, human-initiated
 # install: this runs at fppd startup and must not block a boot for

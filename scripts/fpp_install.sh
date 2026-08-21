@@ -21,6 +21,8 @@ _sm_plugin_dir=$(cd "$_sm_script_dir/.." && pwd)
 . "$_sm_script_dir/lib/fetch.sh"
 . "$_sm_script_dir/lib/verify.sh"
 . "$_sm_script_dir/lib/commands.sh"
+. "$_sm_script_dir/lib/lock.sh"
+. "$_sm_script_dir/lib/activate.sh"
 . "$_sm_script_dir/lib/install-core.sh"
 
 _sm_fppdir=$(sm_fppdir "${1:-}")
@@ -30,7 +32,8 @@ if [ ! -f "$_sm_version_file" ]; then
     sm_log_err "VERSION file missing from plugin directory: $_sm_version_file"
     exit 1
 fi
-_sm_version=$(tr -d ' \t\r\n' < "$_sm_version_file")
+_sm_tr=$(sm_resolve_bin tr /usr/bin/tr /bin/tr) || exit 1
+_sm_version=$("$_sm_tr" -d ' \t\r\n' < "$_sm_version_file")
 
 sm_log "installing showmesh-fpp-plugin $_sm_version (FPPDIR=$_sm_fppdir, plugin dir=$_sm_plugin_dir)"
 

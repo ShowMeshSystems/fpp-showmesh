@@ -1,0 +1,10 @@
+{
+  "note": "Placeholder trust anchor for version 0.1.0. The sha256 values below are not yet real: no release for this version has been published (see README.md's 'The artifact contract' section). Whoever cuts the first real release for this version must regenerate the artifacts[] entries below from that release's own release-manifest.json (filename, kind, architecture, sha256) before an install against it can pass verification.",
+  "version": "0.1.0",
+  "artifacts": [
+    { "filename": "showmesh-fpp-plugin_0.1.0_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+    { "filename": "showmesh-fpp-plugin_0.1.0_linux_arm64.tar.gz", "kind": "go-helper", "architecture": "arm64", "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+    { "filename": "showmesh-fpp-plugin_0.1.0_linux_armv7.tar.gz", "kind": "go-helper", "architecture": "armv7", "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+    { "filename": "showmesh-fpp-plugin-native_0.1.0.tar.gz", "kind": "native-source", "architecture": "any", "sha256": "0000000000000000000000000000000000000000000000000000000000000000" }
+  ]
+}

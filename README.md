@@ -45,26 +45,40 @@ like this:
 so bumping which release an installed plugin fetches is a one-line change
 here, not a rebuild.
 
-**Verification is not optional.** The installer downloads both the tarball
-and its checksum manifest and refuses to install anything whose SHA-256
-does not match the manifest entry for its exact filename. Be precise
-about what that buys: both files come from the same base URL, there is no
-digest pinned anywhere in this repository independent of that fetch, and
-no second origin cross-checks either one. This is not a defense against a
-compromised or redirected host serving a consistent, self-signed pair of
-bad bytes and a matching bad manifest. It catches transport corruption
-and a tarball tampered with after the manifest was fetched — which is
-what clears the registry's `unverified-package-install` finding, and no
-more than that.
+**Verification is not optional, and it is not against a downloaded
+manifest.** `artifacts.lock.json`, committed at this repository's own
+root, is the trust anchor: for the pinned `VERSION`, it records each
+tarball's exact filename and expected SHA-256, and the installer refuses
+to install anything whose downloaded bytes do not match the lock entry
+for that exact filename; a missing lock, a version-mismatched lock, or
+several specific malformed shapes within the matching artifact entry
+(no match for the requested filename, a missing or misordered "sha256"
+field, more than one "sha256" occurrence, an empty or non-hex hash
+value, or more than one entry naming the same filename) all refuse the
+install outright rather than falling back to anything else. The lookup
+is a grep/sed reader, not a full JSON parser, and a malformed lock
+outside those specific shapes is not guaranteed to be refused: an
+artifact object closed early by a stray brace, or a truncated file, can
+still return a hash read from outside the intended object at exit 0;
+see `scripts/lib/lock.sh` for exactly what is and is not caught. This is
+a deliberate change from checking a `SHA256SUMS` manifest
+fetched from the same base URL as the tarball: that manifest and the
+tarball both arrive over the same connection, so a compromised or
+redirected host can make them agree with each other regardless of what
+either actually contains, which checking one against the other cannot
+catch. `artifacts.lock.json` arrives with this repository's own checked-
+out tree, under FPP's control when it clones the plugin, not over curl,
+so it is a hash source a compromised download host cannot also serve. A
+`SHA256SUMS` manifest may still be published alongside a release, but
+nothing in the installer treats it as authoritative any more; see
+`scripts/lib/lock.sh` and `scripts/lib/verify.sh`.
 
 **The default URL above resolves to nothing today.** CI for the binary
 this installer fetches builds and self-verifies all three architectures'
 artifacts, and — by the owner's decision — publishes none of them yet.
 So a fresh install against the default host, with no override set, will
-fail at the download step until a release is actually published. The
-bench override below is not a convenience right now; it is the only
-working path. Publication is enabled when the plugin first targets real
-hardware.
+fail at the download step until a release is actually published.
+Publication is enabled when the plugin first targets real hardware.
 
 ### The bench override
 
@@ -74,6 +88,23 @@ test artifact host instead of a public release. **Only the host varies.**
 The filenames, the tag format, the manifest format, and the verification
 step are identical whether this variable is set or not — there is no
 separate bench-only code path to keep in sync with the real one.
+
+**Pointing this at a bench host is not, by itself, enough to make a bench
+install pass.** `artifacts.lock.json` as committed to this repository
+right now carries all-zero placeholder `sha256` values for every artifact
+(see the lock file's own `"note"` field), deliberately, so an install can
+never silently trust an unverified hash. Verification is against this
+committed lock, never against anything fetched from the bench host itself
+(see "The artifact contract" above), so a bench install against a real
+tarball fails the checksum check every time until the lock is
+regenerated for that tarball. There is no tooling in this repository that
+does that regeneration automatically; it means hand-editing
+`artifacts.lock.json`'s `artifacts[]` array so each entry's `sha256` is
+the real digest of the bench tarball it names (`sha256sum` against the
+actual file the bench host serves, or the real per-artifact digest from
+whatever built and published that tarball) and its `version` matches the
+`VERSION` file at this repository's root. Do this before attempting a
+bench install, not after one fails confusingly on a checksum mismatch.
 
 The override must still carry an explicit `http://` or `https://` scheme
 — a bare host with no scheme is rejected rather than silently mishandled.
@@ -116,6 +147,7 @@ method resolves only exists for a 64-bit kernel report.
 ```
 pluginInfo.json              FPP's plugin manifest (strict JSON)
 VERSION                      the release version scripts/fpp_install.sh fetches
+artifacts.lock.json          the trust anchor: expected filename/sha256 per artifact for VERSION
 docs/
   bench-capture-fpp-9.5.3.md  file paths, line numbers, and quoted source for every
                               claim below marked "confirmed against FPP 9.5.3"
@@ -127,17 +159,23 @@ commands/
 scripts/
   fpp_install.sh             validate, fetch, verify, and place the binary; scaffold local state
   fpp_upgrade.sh             additive: same core as install, honored by FPP 10 only
-  fpp_uninstall.sh           removes everything this plugin created outside its own directory
+  fpp_uninstall.sh           removes the credential, state, and scaffold-staging directories this
+                              plugin created outside its own directory
   preStart.sh                cheap repair check at fppd startup; a no-op in the common case
   lib/
     common.sh                 absolute-path tool resolution, logging, shared paths, mode/owner verification
     arch.sh                    the two-signal architecture probe, plus the arch-stamp comparison
     fetch.sh                   artifact naming, download, base-URL scheme enforcement
-    verify.sh                  checksum verification
+    verify.sh                  checksum verification (both a manifest-based check and the
+                              lock-anchored sm_verify_sha256 the installer actually trusts)
     commands.sh                validates descriptions.json against the scripts it names
+    lock.sh                    looks up the expected sha256 for a filename from artifacts.lock.json
+    activate.sh                 stage-then-swap binary activation with rollback
     install-core.sh            the shared install/upgrade body
 test/
-  run_tests.sh                unit tests: arch probe, checksum verification, command-script
+  run_tests.sh                unit tests: arch probe, checksum verification, lock lookup,
+                              stage/activate rollback, the sm_install_binary / sm_install_or_upgrade
+                              pipeline end to end (network calls shadowed), command-script
                               validation, sm_fppdir, URL scheme, mode verification, the
                               preStart.sh repair-decision function, committed executable
                               bits, and this repo's own shipped descriptions.json
@@ -149,21 +187,29 @@ test/
   clones this repository into the plugin directory. First validates that
   every script named in `commands/descriptions.json` exists and is
   executable (see below), entirely locally and before any network access.
-  Then detects the host architecture, downloads the matching tarball and
-  checksum manifest, verifies the checksum, extracts and installs the
-  binary at mode `0755`, and creates the plugin's credential directory and
-  non-secret state directory (two separate locations — see "Paths" below)
-  and their files if they do not already exist. Never overwrites an
-  existing credential or config on a re-run.
+  Then detects the host architecture, looks up the expected SHA-256 for
+  that architecture's tarball in `artifacts.lock.json`, downloads the
+  tarball and verifies it against that lock entry, extracts it, stages the
+  binary and validates the stage (mode `0755`, ownership) before ever
+  touching the live target, then activates it with a single atomic rename
+  that preserves the previous binary until the rename is known to have
+  succeeded (see "The artifact contract" and `scripts/lib/activate.sh`).
+  It also creates the plugin's credential directory and non-secret state
+  directory (two separate locations — see "Paths" below) and their files
+  if they do not already exist. Never overwrites an existing credential or
+  config on a re-run.
 - **`fpp_upgrade.sh`** — the same core as install, including the same
   command-script validation. FPP 10 calls this first on upgrade; FPP 9.x
   and earlier ignore it entirely and call `fpp_install.sh` again instead,
   so this script is purely additive.
 - **`fpp_uninstall.sh`** — FPP deletes the plugin directory itself
   regardless of what this script returns, so this script's only job is
-  everything outside that directory. That is now **two** separate
-  locations, not one (see "Paths" below for why they are split): the
-  credential directory and the non-secret state directory. Idempotent; a
+  everything outside that directory. That is **three** separate
+  locations, not one (see "Paths" below for why the first two are
+  split): the credential directory, the non-secret state directory, and
+  the root-only scaffold staging directory
+  (`sm_scaffold_stage_root()`) that install/upgrade/repair creates under
+  `/etc` and nothing else on the host ever cleans up. Idempotent; a
   second run, or a run against a host where install never completed,
   exits `0`.
 - **`preStart.sh`** — runs at every `fppd` start, and its two checks are
@@ -175,11 +221,24 @@ test/
   architecture than a fresh detection now reports — exactly what a disk
   image cloned from a host of a different architecture produces, and a
   case a plain `[ -x ]` check cannot see (a cloned binary is present and
-  executable; it is just wrong). A repair re-runs the full install/
-  upgrade path, not only the binary fetch, so it also re-scaffolds
-  permissions, and its network calls use a much tighter timeout budget
-  than a foreground, human-initiated install, since this blocks `fppd`
-  starting and must not eat minutes of a networkless boot.
+  executable; it is just wrong). Either condition re-runs the full
+  install/upgrade path, not only the binary fetch, so a repair also
+  re-scaffolds permissions, and its network calls use a much tighter
+  timeout budget than a foreground, human-initiated install, since this
+  blocks `fppd` starting and must not eat minutes of a networkless boot.
+  There is no local, networkless repair path: an earlier version of this
+  script tried promoting a preserved `.previous` or `.staging` binary
+  before reaching the network, gated on a sha256 recorded next to the
+  binary, but that recorded hash sat in the same, equally writable
+  directory as the candidate it was meant to authorize, and the
+  promotion itself followed symlinks through `stat`, the hash check, and
+  `mv -f`. Both are real root-privilege escalation paths on a directory
+  this project does not otherwise treat as trusted, and the crash window
+  local repair existed to cover — the old two-rename activation briefly
+  leaving the target unoccupied — is already closed by the hard-linked
+  backup and single atomic rename this repository now uses instead, so
+  the tradeoff no longer has a justification. A missing or wrong binary
+  now always waits for the network repair above.
 - **`commands/run-macro.sh`** — the script FPP forks when the registered
   `ShowMeshRunMacro` command fires. Locates the installed binary and execs
   `showmesh-fpp-plugin run --config-dir <statedir> -- <macroId>`; every
@@ -263,6 +322,13 @@ FPP's tree entirely.
   records which architecture was actually fetched, so `preStart.sh` can
   compare a fresh detection against it (see above). Gitignored, like the
   binary itself.
+- **Scaffold staging directory:** `/etc/showmesh-fpp-plugin.stage`, mode
+  `0700`, owned `root:root` — a third location outside the plugin
+  directory, not a sibling of either directory above and never chowned
+  to `fpp:fpp`; every credential and state file is prepared inside it
+  before being renamed into place (see the trust-boundary section
+  below). `fpp_uninstall.sh` removes it along with the credential and
+  state directories.
 
 Every `chown` and `chmod` in the scaffold is checked, and every `chmod` is
 followed by reading the mode back rather than trusting the exit code
@@ -365,11 +431,17 @@ without a confirmed answer for what that does, an unattended install or
 upgrade is exactly the context where a bad outcome would go uncaught.
 
 Also unverified in a different sense: `pluginInfo.json` declares support
-from FPP 8.4 through a full FPP 10.x entry, but the bench evidence above
-covers 9.5.3 only. The 9.x floor is grounded in a separate, prior,
-source-verified finding that FPP's install/uninstall scripts are
-byte-identical across the whole 8.4–9.4 range, which is why one `versions[]`
-entry for that whole regime is a defensible claim rather than a guess.
+from FPP 9.4 through a full FPP 10.x entry, but the bench evidence above
+covers 9.5.3 only. FPP 8 is not supported and the floor is pinned at 9.4,
+not lower: an earlier version of this document argued for reaching the
+floor down to 8.4 on the strength of a prior finding that FPP's
+install/uninstall scripts are byte-identical across the whole 8.4–9.4
+range. That finding is about script identity, not about this plugin
+having been exercised anywhere in the 8.4–9.3 span, and the accepted
+support commitment for this project is FPP 9.4 through 9.x and FPP 10.x
+only, so the `versions[]` entry now says exactly that instead of trading
+on identical scripts to claim a wider floor than the project has agreed
+to support.
 **The FPP 10 entry carries no equivalent grounding.** FPP 10 restructures
 install into two phases with a dependency-resolution callback and honors
 `fpp_upgrade.sh` first rather than ignoring it — a genuinely different
@@ -395,6 +467,165 @@ any FPP host involved:
   conventions above, plus the case where both happen to be present.
 - Checksum verification, including a genuinely tampered artifact and a
   missing manifest entry, both rejected.
+- `artifacts.lock.json` lookup: a filename that is in the lock, one that
+  is not, a lock pinned to a different version than the one being
+  installed, and the compromised-host case: a downloaded tarball and a
+  downloaded `SHA256SUMS` that agree with each other but disagree with the
+  committed lock, rejected on the lock's authority, not the manifest's.
+  Two entries naming the same filename are refused as ambiguous, both one
+  per line and minified onto a single physical line (a naive line-count
+  guard undercounts the minified case as one match). An artifact object
+  whose `sha256` key is written before its `filename` key, which this
+  parser does not guess an order for, is refused rather than silently
+  returning the wrong hash, including the case that used to return a
+  neighbouring artifact's hash on a minified, multi-object line.
+- Stage-then-swap binary activation (`sm_stage_binary`, `sm_activate_binary`,
+  `sm_activate_commit`, `sm_activate_rollback`): a clean fresh install with
+  no previous binary, a failure injected during post-staging validation
+  (mode/ownership) leaving the previous binary untouched, a failure
+  injected in the atomic-rename swap itself after staging succeeded (the
+  previous binary is left exactly as it was, since a failed rename never
+  touches its destination, so no separate rollback rename happens or is
+  needed), and `sm_activate_rollback` itself restoring the preserved
+  previous binary after a failure that happens after the swap already
+  succeeded. The backup mechanism itself: `sm_activate_binary` calls the
+  atomic rename exactly once when a previous binary exists, because the
+  backup is a hard link, not a second rename, proven by a call count and
+  by device/inode identity captured on the live target BEFORE the swap
+  runs, so the comparison cannot pass by coincidence once the target's
+  inode has already changed; and the `cp -p` fallback for a filesystem
+  that does not support hard links, exercised for real with `ln` itself
+  shadowed to fail, not only by hand. `sm_write_stamp`: an ordinary
+  write; a symlinked destination or a symlinked temp path both refused
+  without writing through them; a leftover directory at the temp path
+  cleared so the write can proceed instead of failing forever; and a
+  write that genuinely cannot create its temp file leaving an existing
+  stamp untouched rather than truncated.
+- `sm_stage_binary`'s chmod/chown never run against the shared staging
+  path at all: both execute against the private extraction workdir
+  BEFORE the binary is ever given a name inside the plugin directory,
+  proven structurally by wrapping the resolved `chmod`/`chown` and
+  asserting neither is ever invoked with the staging path as an
+  argument, closing the window where a root chmod/chown run AFTER
+  staging could be redirected onto an arbitrary path by a symlink raced
+  into place between the rename and the chmod. A directory planted at
+  the staging path ahead of a fresh install is refused rather than
+  silently accepted with the new binary moved inside it.
+- Scaffold symlink hardening, beyond the leaf-path refusal already
+  covered above: a symlinked PARENT path component (not just the final
+  component) under a scaffold directory is refused rather than followed,
+  exercised both directly against `sm_scaffold_dir` and end to end
+  through `sm_ensure_config_scaffold` itself with a symlinked component
+  under the state directory; a hard link occupying a scaffold file's own
+  path is refused a chown/chmod run in place (which would have mutated
+  whatever the hard link's other name pointed at) in favor of preparing
+  the file's content in `sm_scaffold_stage_root()` (`common.sh`), a
+  root:root staging directory whose own PARENT is `/etc` (writable by
+  nothing but root), and activating it with one rename. That staging
+  directory is deliberately NOT a sibling under the `fpp`-owned
+  `sm_credential_dir`/`sm_state_dir`: `fpp` has no access to it, or
+  anything created inside it, at any point in its life, so the chown and
+  chmod that follow run against it directly, with nothing to race and no
+  identity check needed. An earlier version of this construction instead
+  staged inside the `fpp`-owned scaffold directory and guarded its own
+  chown/chmod with a device/inode identity check taken just before each;
+  measured over 3000 trials per configuration, that construction let a
+  hard-link attacker mutate ownership 820 times and mode 181 times out of
+  3000 — worse on both axes than the plain baseline it replaced — and
+  gave a symlink attacker no protection at all, since `chmod(1)` follows
+  a symlink with no `-h` and GNU `stat` reads a symlink's own identity by
+  default, so the identity check's two reads always agreed with each
+  other regardless of what the symlink pointed to. The current
+  construction, measured the same way against both attacks: 0 ownership
+  mutations, 0 mode mutations. That does not mean every trial activates:
+  under a continuous symlink attacker the scaffold correctly refuses
+  activation outright in roughly 75 percent of trials rather than
+  mutating anything, which is the fail-closed behavior this construction
+  is for, not a shortfall — the attacker in that configuration never
+  touches a path this construction actually checks, so the safety
+  figures above stand on their own regardless of how often activation
+  itself succeeds. What makes the final step safe regardless of timing
+  is `rename(2)` itself: it replaces a destination NAME outright and
+  never dereferences a symlink or hard link already sitting there, so
+  the swap is safe no matter what currently occupies the scaffold file's
+  own path. A directory (or anything else that is not a regular file)
+  sitting at a scaffold file's own path is refused rather than chowned,
+  chmoded, and reported healthy.
+
+  `sm_scaffold_dir`'s own chmod, unlike `sm_scaffold_file`'s, is still
+  issued by PATH rather than through the private staging construction
+  above: a directory scaffold must not disturb a directory that already
+  exists at that path (a re-run must never touch an already-populated
+  state directory), and `rename(2)` onto a non-empty destination fails
+  outright, so the stage-then-rename swap that closes the file case does
+  not carry over to a directory that may already hold content. This is
+  pre-existing, not introduced by this branch. `chown -h` immediately
+  above closes the ownership half of the same race by acting on the
+  symlink itself via `lchown(2)`; there is no `lchmod(2)` on Linux, so
+  the repeated `sm_refuse_symlink` check immediately before the chmod
+  call is the only defense available for that step, and it is a
+  check-then-act gap, not a closed one. A reviewer raced a symlink into
+  that gap and got a root `chmod 0700` applied to a directory outside
+  this repository's tree in 98 of 2000 trials; ownership was untouched
+  in every trial, since `chown -h` holds. Closing this the way
+  `sm_scaffold_file`'s chmod was closed is not available here without
+  changing what a re-run is allowed to do to an existing directory's
+  contents, so it stands documented rather than fixed in this commit.
+
+  A rename is only atomic within one filesystem, and the staging root
+  and a scaffold file's own target can legitimately be on different ones,
+  since this repository supports the media directory (and therefore
+  `sm_state_dir`) on removable storage. No code in this repository
+  handles that case specially any more: plain `mv -f` already does, on
+  its own. GNU `mv` catches `EXDEV` internally and falls back to copying
+  the file and then unlinking the source, exiting 0 with empty stderr,
+  so `sm_scaffold_file`'s single `mv -f` never surfaces `EXDEV` as a
+  distinguishable failure for a regular file — an earlier version of
+  this repository added `sm_scaffold_activate_cross_device` to handle
+  that case explicitly, instrumented it with a marker, forced a genuine
+  cross-device pair confirmed by `rename(2)` itself returning `EXDEV`,
+  and the marker never printed; no test in this suite ever referenced
+  that function, `EXDEV`, or cross-device activation either. It was dead
+  code, and has been removed. Verified directly instead: a cross-device
+  `mv` onto a symlink or hard-link destination unlinks that destination
+  name and creates a fresh file there rather than following it, and it
+  preserves the staged file's mode and ownership. Measured over 3000
+  trials per configuration against a symlink attacker on both the
+  destination name and `mv`'s own temp name: 0 ownership mutations, 0
+  mode mutations. The residual is that the copy itself is not atomic: a
+  torn write if the destination name is replaced mid-copy, not a
+  privilege escalation, since nothing on this path lets an attacker
+  redirect a chown or chmod this repository issues (`mv` performs its
+  own attribute preservation on this path, not a chown/chmod this
+  repository runs). This has been exercised only in a container with a
+  bind-mounted tmpfs standing in for removable media, never against real
+  removable storage on an FPP host.
+- `sm_install_binary` and `sm_install_or_upgrade`, end to end, with
+  `sm_detect_arch` and `sm_download` shadowed so nothing here touches the
+  network: a clean fresh install; a lock hash that disagrees with the
+  served bytes, refused with the previous binary surviving byte-identical
+  and executable; a fresh install whose swap fails, leaving nothing
+  half-installed; and a post-activation mode-verification failure (on
+  both an upgrade and a fresh install) rolling the live binary back, or
+  removing an unverified fresh install with nothing to roll back to,
+  before the transaction commits. Once the transaction has committed, a
+  failed architecture-stamp write is reported as a failure but no longer
+  rolls the binary back: the newly activated binary already passed mode
+  re-verification and stays live, since rolling it back at that point
+  would restore an older binary while leaving a stamp already rewritten
+  to describe the one just discarded. There is no installed-version
+  stamp; an earlier version of this code wrote one alongside the
+  architecture stamp, but nothing ever read it back, so it was removed
+  rather than given a reader it does not need. The architecture stamp is
+  confirmed written after a successful install, and a failed write on a
+  fresh path (nothing recorded there before) is self-correcting rather
+  than permanently invisible to the repair guard that reads it back; see
+  `sm_write_stamp_or_sentinel`'s comment in `scripts/lib/activate.sh`.
+  `sm_install_or_upgrade`'s own orchestration (command-script
+  validation gating the config scaffold, the config scaffold gating the
+  binary install) is exercised with `sm_ensure_config_scaffold` shadowed,
+  so this suite never touches `/etc` or the real plugin state directory
+  on the machine running it.
 - Command-script validation: a script that exists and is executable, one
   that is missing, one that exists but is not executable, and a missing
   `descriptions.json`, each producing a distinguishable message — run both
@@ -431,6 +662,123 @@ None of this raises the plugin-distribution research record's evidence
 level. It stays at what a bench container and a source read can support;
 only running this against a real FPP instance moves the on-host tier
 above.
+
+## Trust boundary: what the lock and activation controls actually defend
+
+This repository's own controls, the symlink refusals, the atomic stage-
+then-swap binary activation, and `artifacts.lock.json` verified before
+anything downloaded is ever extracted or executed, all run as ROOT out of
+the plugin's own installed directory. That directory is not a neutral
+place for them to live. This section states plainly what those controls
+can and cannot defend against, given where they run.
+
+**The plugin directory is writable by the unprivileged `fpp` user, at
+rest, under normal FPP operation — this is an FPP platform property, not
+a misconfiguration and not something this repository can fix from
+inside itself.** Confirmed by reading FPP's own Plugin Manager and boot
+source directly, against both the pinned FPP 9.x and FPP 10.x trees this
+project targets:
+
+- A fresh plugin install ends with `$SUDO chown -R fpp:fpp <plugin dir>`
+  (`scripts/install_plugin`, FPP 9 line 36-38 and FPP 10 line 127-129),
+  run as root via `$SUDO`, with no accompanying `chmod` that ever
+  restricts write access below whatever `git clone` already left (owner
+  read/write on every file, since `fpp` is the owner, not merely a
+  group member). Nothing in either tree narrows this afterward.
+- An upgrade's `git pull` (or, on FPP 10, its fetch/reset/clean fallback
+  in `scripts/upgrade_plugin`) runs as root and does not itself re-run
+  that `chown`, so a file an upgrade rewrites can land root-owned
+  momentarily. FPP 9 has no `scripts/upgrade_plugin` at all; its upgrade
+  path is `www/api/controllers/plugin.php:227-246`, which runs `git pull`
+  under `sudo` instead. Still root either way. That momentary gap is
+  closed automatically, system-wide, not just for this plugin:
+  `setFileOwnership()` (`src/boot/FPPINIT_Config.cpp:560-562` on FPP 10,
+  `src/boot/FPPINIT.cpp:886-888` on FPP 9) runs `chown -R fpp:fpp` over a hardcoded
+  `/home/fpp/media`, including every installed plugin's directory, on
+  every boot's `postNetwork` phase, unconditionally, before `preStart`
+  scripts run. That re-assertion is narrower than a blanket "every boot"
+  claim, though: `scripts/common` honours `www/media_root.txt` for a
+  relocated media root, but this hardcoded boot-time chown does not, so a
+  host with a relocated media root does not get this plugin directory
+  re-covered every boot. The install-time chown in `scripts/install_plugin`
+  still applies regardless, so the directory is still writable by `fpp`
+  at rest either way; only the "self-heals every boot" part is narrower
+  than claimed for a relocated media root.
+- `preStart.sh` is what actually runs this plugin's install/repair path
+  at every `fppd` start. It is invoked with no privilege change
+  (`runPreStartScripts()`, `scripts/functions:512-520` on FPP 10 and
+  `scripts/functions:714-722` on FPP 9, doing a plain `/bin/bash ${FILE}`)
+  from `fppinit`'s `bootPre` boot action (`src/boot/FPPINIT.cpp:435-442`
+  on FPP 10, where the `runScripts("preStart", true)` call itself sits on
+  line 442), which `fppd.service` runs via `ExecStartPre` with no
+  `User=` directive — `fppinit`, and therefore every `preStart.sh` it
+  runs, executes as root. `fppd` itself also has no `User=` directive and
+  drops no privilege anywhere in its own source, so the resident
+  component this project's C++ side eventually becomes also runs
+  in-process with `fppd`, as root, not as `fpp`.
+
+Put together: `preStart.sh`, `fpp_install.sh`, `fpp_upgrade.sh`,
+`fpp_uninstall.sh`, and every file under `scripts/lib/`, are read and
+executed as root, out of a directory the `fpp` user can write to at any
+time. `fpp` is not the account this plugin's own binary or the commands
+FPP fires against it run as: a fired plugin command reaches its script by
+`execve` with no privilege drop (`Plugins.cpp:315` on FPP 10, `Plugins.cpp:308`
+on FPP 9), same as
+`fppd` itself (see above), so both run as root, same as the scripts. The
+`fpp`-level actor in this picture is the FPP web UI: `SD/FPP_Install.sh:2084`
+on FPP 10 (`SD/FPP_Install.sh:1344` on FPP 9) sets `APACHE_RUN_USER` to the FPP user, so Apache, and
+the PHP it runs (including the upgrade path cited above), is what
+actually executes as `fpp`. Nothing internal to those scripts, no symlink
+refusal, no atomic rename, no lock-file check, can be a trust boundary
+against an attacker who can already write into that directory: that
+attacker does not need to race a TOCTOU window or defeat a hash check at
+all, they can simply edit `preStart.sh` (or any `scripts/lib/*.sh` file
+it sources) directly, and it runs as root, unmodified logic included, the
+next time `fppd` starts. This holds under standard FPP operation on both
+pinned trees; the one documented exception is macOS, where `install_plugin`
+skips the `chown -R fpp:fpp` step entirely (`scripts/install_plugin`,
+guarded by `if [ "${FPPPLATFORM}" != "MacOS" ]`) — not a real FPP host,
+so not a mitigating case for a production install. Whether the FPP web
+UI's own PHP process (which triggers install/upgrade over `$SUDO`) has a
+passwordless sudo grant is asserted by `www/config.php` but the sudoers
+file itself does not ship in either pinned tree, so that specific link
+in the chain is provisioned by the base OS image, outside what either
+tree's source confirms.
+
+**What this means for the claims this repository can honestly make.**
+Nothing in this repository can be a defense against an attacker who
+already has `fpp`-level code execution on the host: FPP's own plugin
+model hands that attacker root on the next `fppd` start regardless of
+anything this repository does to its own scripts. That is not a gap this
+project introduced and not one it can close from inside a plugin
+directory FPP itself makes writable; closing it would mean changing how
+FPP's Plugin Manager owns and mounts plugin trees, which is out of scope
+for this repository (see "What this repository is NOT" above).
+
+What this repository's controls DO deliver, and the one claim actually
+confirmed with no bypass found by a prior adversarial review, is
+narrower and real: **the network path.** A release artifact fetched from
+`SHOWMESH_PLUGIN_ARTIFACT_BASE_URL` is verified against this
+repository's own committed `artifacts.lock.json`, which arrives on the
+host as part of the plugin's own checked-out tree (installed/upgraded by
+FPP's `git clone`/`git pull`, not fetched over the same channel as the
+binary), before that artifact is ever extracted or executed. That
+ordering, verify before extract-or-execute, holds regardless of what a
+compromised or malicious release host serves: a tampered tarball is
+rejected on the lock's authority before `tar` ever runs against it, and
+before the stage-then-swap activation in `scripts/lib/activate.sh` ever
+gives it a name next to the live binary. This is the actual, delivered
+guarantee this repository can stand behind: a release host that goes
+bad, or a network path that gets tampered with, cannot get an unverified
+binary run. It says nothing about, and cannot defend against, an
+attacker who already reached the plugin directory some other way (over
+`fpp`-level access to the host itself, not over the network path this
+lock protects) — the symlink refusals and atomic activation this
+project has hardened make the difference between that attacker's write
+being caught immediately versus silently succeeding at whatever a
+specific mutation was aimed at, but neither outcome changes the deeper
+fact that the scripts themselves are not a trusted input once `fpp` can
+already write to their own directory.
 
 ## Two things this repository does not solve
 

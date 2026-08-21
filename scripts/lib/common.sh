@@ -163,6 +163,16 @@ sm_arch_stamp_path() {
     printf '%s\n' "$1/.installed-arch"
 }
 
+# Reads a stamp file's contents with trailing whitespace stripped by
+# command substitution, absolute-path tool resolution included so this
+# stays consistent with every other read in this repository. Prints
+# nothing and returns non-zero if the file cannot be read.
+sm_read_stamp() {
+    local _sm_cat
+    _sm_cat=$(sm_resolve_bin cat /bin/cat /usr/bin/cat) || return 1
+    "$_sm_cat" "$1" 2>/dev/null
+}
+
 # Reads back the octal permission bits actually set on a path, trying GNU
 # stat's format first (Debian FPP hosts) and falling back to BSD/macOS
 # stat's format so this repository's own tests run unmodified on a
@@ -177,6 +187,24 @@ sm_current_mode() {
         return 1
     fi
     printf '%s\n' "$_sm_result"
+}
+
+# Root-controlled staging directory sm_scaffold_file (install-core.sh)
+# stages every credential/state file in before it is ever given a name
+# inside sm_credential_dir or sm_state_dir. Deliberately NOT a sibling
+# under either of those: both are chowned to fpp:fpp so the plugin's own
+# binary can use them, so a staging subdirectory nested inside one of
+# them would have an "fpp"-OWNED parent, and unlinking or renaming a
+# directory entry needs write permission on the PARENT, not the child —
+# "fpp" could replace a staging directory wholesale regardless of its own
+# 0700 mode. This path's parent is /etc, which nothing but root can ever
+# write into, so nothing but root can ever replace it. Overridable via
+# SM_SCAFFOLD_STAGE_ROOT (the same override pattern SM_INSTALL_OWNER
+# uses) so this repository's own tests can point it at a tmp directory
+# the unprivileged user running the suite actually controls; production
+# code never sets it.
+sm_scaffold_stage_root() {
+    printf '%s\n' "${SM_SCAFFOLD_STAGE_ROOT:-/etc/showmesh-fpp-plugin.stage}"
 }
 
 # Confirms a chmod actually took effect, rather than trusting its exit
@@ -196,8 +224,156 @@ sm_verify_mode() {
         return 1
     }
     if [ "$_sm_actual" != "$_sm_expected" ]; then
-        sm_log_err "mode verification failed for $_sm_path: requested $_sm_expected, filesystem reports $_sm_actual (a vfat/exFAT mount silently ignoring chmod, because it derives modes from mount options, produces exactly this mismatch)"
+        sm_log_err "mode verification failed for $_sm_path: requested $_sm_expected, filesystem reports $_sm_actual (a vfat/exFAT mount silently ignoring chmod, because it derives modes from mount options, produces exactly this mismatch; so does $_sm_path having been swapped for a different object, such as a symlink, since it was created — this check alone cannot tell those two causes apart)"
         return 1
     fi
     return 0
+}
+
+# Refuses (rather than follows) a symlink already present at $1. Every
+# scaffold and stamp path this project chowns, chmods, or creates through
+# lives inside a directory the "fpp" system user can also write to (the
+# same user fppd and this plugin's own binary run as), so a symlink
+# planted there before this check runs must stop a root-run install or
+# repair cold instead of being dereferenced. `-L` uses lstat, so it
+# catches a symlink whether it points at a real file or nowhere at all
+# (a dangling symlink), which `-e` alone would miss.
+sm_refuse_symlink() {
+    if [ -L "$1" ]; then
+        sm_log_err "refusing to operate on $1: a symlink exists at that path"
+        return 1
+    fi
+    return 0
+}
+
+# Creates a NEW plain file at $1 with content $2, refusing outright if
+# anything already occupies that path, symlink or otherwise. Uses the
+# shell's own noclobber option (`set -C`) rather than a separate `[ ! -e ]`
+# test followed by a redirect: noclobber's existence check and the file
+# creation are one kernel-level operation (open with O_EXCL), so there is
+# no gap between "nothing is there" and "the file is written" for a
+# symlink, dangling or not, to be planted into. A plain `[ ! -e ]` test
+# would also be fooled by a dangling symlink specifically, since `-e`
+# dereferences and reports false for one, which is exactly what let a
+# redirect create a file at a dangling symlink's target in the defect
+# this replaced.
+sm_create_new_file() {
+    if ! ( set -C; printf '%s\n' "$2" > "$1" ) 2>/dev/null; then
+        if [ -e "$1" ] || [ -L "$1" ]; then
+            sm_log_err "refusing to create $1: something already exists at that path (a symlink planted between the last check and this write, or a genuine race with another process)"
+        else
+            sm_log_err "could not create $1"
+        fi
+        return 1
+    fi
+    return 0
+}
+
+# Creates every missing component of absolute path $1 as a directory,
+# refusing (rather than following, the way `mkdir -p` does) a symlink at
+# ANY component, not only the leaf. sm_refuse_symlink alone is not
+# enough for a scaffold directory: `mkdir -p` walks and creates every
+# parent component itself, and it follows a symlink sitting at any of
+# those intermediate components exactly as readily as it would create a
+# missing one. A symlinked PARENT of, say, the plugin's state directory
+# (planted by "fpp", which can write everywhere a scaffold directory's
+# own ancestors live, since none of them are refused today) let a root
+# scaffold create a directory, and every file scaffolded inside it,
+# somewhere entirely different from where the plugin intended: verified
+# against a real Debian container, a symlinked "plugindata" path
+# component redirected a scaffold into creating a directory and four
+# files under /etc, owned by "fpp", at exit 0.
+#
+# Each component is checked and created one at a time, walking from the
+# root, so a symlink anywhere in the path is caught before anything
+# past it is ever touched.
+sm_mkdir_p_refuse_symlinks() {
+    local _sm_target _sm_mkdir _sm_prefix _sm_rest _sm_component
+    _sm_target="$1"
+    _sm_mkdir=$(sm_resolve_bin mkdir /bin/mkdir /usr/bin/mkdir) || return 1
+
+    case "$_sm_target" in
+        /*) : ;;
+        *)
+            sm_log_err "refusing to scaffold relative path $_sm_target: only absolute paths are supported"
+            return 1
+            ;;
+    esac
+
+    _sm_prefix=""
+    _sm_rest="${_sm_target#/}"
+    while [ -n "$_sm_rest" ]; do
+        _sm_component="${_sm_rest%%/*}"
+        case "$_sm_rest" in
+            */*) _sm_rest="${_sm_rest#*/}" ;;
+            *) _sm_rest="" ;;
+        esac
+        _sm_prefix="$_sm_prefix/$_sm_component"
+
+        if [ -L "$_sm_prefix" ]; then
+            sm_log_err "refusing to scaffold $_sm_target: path component $_sm_prefix is a symlink"
+            return 1
+        fi
+        if [ -d "$_sm_prefix" ]; then
+            continue
+        fi
+        if [ -e "$_sm_prefix" ]; then
+            sm_log_err "refusing to scaffold $_sm_target: path component $_sm_prefix exists and is not a directory"
+            return 1
+        fi
+        if ! "$_sm_mkdir" "$_sm_prefix" 2>/dev/null && [ ! -d "$_sm_prefix" ]; then
+            sm_log_err "could not create directory component $_sm_prefix while scaffolding $_sm_target"
+            return 1
+        fi
+        if [ -L "$_sm_prefix" ]; then
+            sm_log_err "refusing to scaffold $_sm_target: path component $_sm_prefix is a symlink immediately after creation"
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Ensures sm_scaffold_stage_root() exists, mode 0700, and owned
+# root:root. This deliberately does NOT use sm_scaffold_dir: that
+# function's whole job is to hand a directory over to fpp:fpp, which is
+# exactly what this directory must never be. Every path component is
+# walked and refused-if-symlink by sm_mkdir_p_refuse_symlinks first, the
+# same defence sm_scaffold_dir itself relies on, then the leaf is
+# re-checked, chowned, and chmoded.
+#
+# The chown is not optional: sm_mkdir_p_refuse_symlinks only creates a
+# missing directory, it does not touch one that is already there, so
+# before this chown existed, a directory pre-planted at this path and
+# already owned fpp:fpp (by "fpp", the only non-root actor who can ever
+# reach this path's parent before it exists) was accepted here at exit
+# 0, chmoded 0700, and handed back as though it were the root-only
+# staging root sm_scaffold_file's own chown/chmod calls rely on having
+# no other writer than root. Chowning it to root:root on every call
+# closes that: an existing fpp-owned directory is reclaimed to root
+# before anything is staged inside it, the same way sm_scaffold_dir's
+# own `chown -h` reasserts ownership on every call rather than trusting
+# whatever ownership a pre-existing path happened to have. Overridable
+# via SM_SCAFFOLD_STAGE_OWNER (the same pattern SM_INSTALL_OWNER uses)
+# so this repository's own tests can exercise a real, successful chown
+# without a "root" distinct from the user running them; production code
+# never sets it and gets the real root:root target.
+sm_ensure_scaffold_stage_dir() {
+    local _sm_dir _sm_chmod _sm_chown
+    _sm_dir=$(sm_scaffold_stage_root)
+    _sm_chmod=$(sm_resolve_bin chmod /bin/chmod /usr/bin/chmod) || return 1
+    _sm_chown=$(sm_resolve_bin chown /bin/chown /usr/bin/chown /usr/sbin/chown) || return 1
+
+    sm_refuse_symlink "$_sm_dir" || return 1
+    sm_mkdir_p_refuse_symlinks "$_sm_dir" || return 1
+    sm_refuse_symlink "$_sm_dir" || return 1
+    "$_sm_chown" -h "${SM_SCAFFOLD_STAGE_OWNER:-root:root}" "$_sm_dir" || {
+        sm_log_err "could not set ownership of staging directory $_sm_dir to ${SM_SCAFFOLD_STAGE_OWNER:-root:root}"
+        return 1
+    }
+    sm_refuse_symlink "$_sm_dir" || return 1
+    "$_sm_chmod" 0700 "$_sm_dir" || {
+        sm_log_err "could not set permissions on staging directory $_sm_dir"
+        return 1
+    }
+    sm_verify_mode "$_sm_dir" 700
 }
