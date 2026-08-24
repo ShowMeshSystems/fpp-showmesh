@@ -121,9 +121,9 @@ Re-run with one deliberate syntax error injected into the bundled source:
   tested, and the FPP 9 adapter is exercised by the plugin repository's own
   load bench, but the install script's native path was not run end to end on a
   9.5.3 container.
-- **No credential.** The install creates an empty credential file by design; a
-  provisioned credential and an actual observation reaching a coordinator are
-  not part of this evidence.
+- **No credential, in this install run.** The install creates an empty
+  credential file by design. A provisioned credential and an observation
+  actually reaching a coordinator came later, in the section below.
 - **fppd was not restarted into a running show.** The installer deliberately
   never restarts fppd; a newly activated object is only picked up on the
   operator's own reload.
