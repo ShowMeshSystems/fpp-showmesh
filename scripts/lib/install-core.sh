@@ -480,6 +480,31 @@ sm_install_or_upgrade() {
 
     sm_ensure_config_scaffold || return 1
     sm_install_binary "$_sm_plugin_dir" "$_sm_fppdir" "$_sm_version" || return 1
+
+    # The resident C++ component is installed second and its failure is
+    # deliberately NOT fatal to the install as a whole. The macro helper above
+    # is already live and verified at this point, and it is the half a
+    # schedule entry or a button on this host depends on. The resident
+    # component compiles here against headers this repository does not
+    # control, so a host that cannot build it must still be left with a
+    # working macro helper rather than an install FPP reports as failed and an
+    # operator reads as "the plugin is broken".
+    #
+    # That is not the same as reporting success for something that failed. The
+    # failure is logged loudly here and recorded on the host at
+    # sm_native_failure_marker_path, which survives the install output
+    # scrolling past, and sm_install_native itself rolls back anything it
+    # partially activated. Set SM_REQUIRE_NATIVE=1 to make it fatal instead,
+    # which is what a bench or a CI run that exists to prove the resident
+    # component works should do.
+    if ! sm_install_native "$_sm_plugin_dir" "$_sm_fppdir" "$_sm_version"; then
+        if [ "${SM_REQUIRE_NATIVE:-0}" = 1 ]; then
+            sm_log_err "the resident component failed to install and SM_REQUIRE_NATIVE=1; failing the install"
+            return 1
+        fi
+        sm_log_err "the resident component is NOT installed on this host; the macro helper is installed and working. See $(sm_native_failure_marker_path) for the reason."
+    fi
+
     sm_note_possible_restart_need
 
     return 0
