@@ -19,5 +19,12 @@
       "branch": "main",
       "sha": ""
     }
-  ]
+  ],
+  "dependencies": {
+    "packages": [
+      "make",
+      "g++",
+      "libcurl4-openssl-dev"
+    ]
+  }
 }
