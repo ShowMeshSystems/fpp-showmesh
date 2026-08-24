@@ -21,9 +21,32 @@ policy — lives in a separately built Go binary that this repository's
 repository does not contain that source and is not where a change to that
 behavior belongs.
 
-There is also no `Makefile` here, deliberately. FPP recompiles every plugin
-directory containing one on every core upgrade, which would race a Go
-binary this repository never built in the first place.
+There is also no root `Makefile` here, and the reason recorded earlier for
+that was wrong. It said FPP recompiles every plugin directory containing a
+`Makefile` on every core upgrade, which would race the Go binary. Neither
+FPP 9.5.3 (`7979a4bb0bb9068fea71f3b447e273d5c0ea01e3`) nor FPP 10.0
+(`370e62ed7e8c8318da6ee5b01312b8b75082d952`) contains any code that runs
+`make` on a plugin directory; every `Makefile` reference in either tree is
+BeagleBone cape-overlay or WiFi-driver work. There is no root `Makefile`
+because nothing needs one, not because one would be dangerous.
+
+What FPP actually runs is this plugin's own scripts, and that is the
+compile hook by design: `www/api/controllers/plugin.php` resolves
+`scripts/fpp_install.sh` (falling back to a root `fpp_install.sh`), and on
+FPP 10 the post-pull step runs `fpp_upgrade.sh` if present, else
+`fpp_install.sh`. FPP 9.5.3 has no `fpp_upgrade.sh` handling at all.
+`src/Plugins.cpp` only ever `dlopen`s a path; FPP never builds the object.
+
+Two consequences worth knowing before changing the install path:
+
+- `callbacks` is what makes the resident C++ component loadable at all. A
+  plugin directory with no `callbacks` file loads nothing, and FPP reports
+  that as success. See that file's own comment for why it prints `c++` and
+  nothing else.
+- fppd resolves the shared object as `lib<plugin-directory-name>.so`,
+  `libfpp-showmesh.so` here, unless `callbacks` names one after `c++:`.
+  Install-time FPP-major detection is what decides which built adapter
+  (`libshowmesh-fpp9.so` or `libshowmesh-fpp10.so`) takes that name.
 
 ## The artifact contract
 

@@ -1,0 +1,30 @@
+#!/bin/sh
+# fppd reads this script's stdout as a comma-separated list of the plugin
+# types it provides, and a plugin with no `callbacks` file at all is a
+# successful no-op that loads nothing: FPP 10.0's
+# PluginManager::loadPlugin logs "has no callbacks; nothing for fppd to
+# load" and returns true. So this file, not pluginInfo.json, is what makes
+# the resident C++ component loadable at all.
+#
+# It prints exactly "c++" and nothing else, and that exclusivity is
+# load-bearing rather than tidiness. ScriptFPPPlugin's constructor
+# consumes "media", "playlist", and "lifecycle" into script callbacks, and
+# PluginManager::loadUserPlugin then takes the SCRIPT path whenever
+# hasCallback() is true and never reaches the dlopen branch. Declaring any
+# of those three here would silently prevent the shared library from ever
+# being loaded, while still looking like a working plugin. The resident
+# component observes the playlist natively from inside fppd once loaded;
+# it does not want a forked script callback.
+#
+# No path is given after "c++", so fppd uses its own default of
+# lib<plugin-directory-name>.so, which is libfpp-showmesh.so here. The
+# installer is what decides which version adapter earns that name: the
+# built objects are libshowmesh-fpp9.so and libshowmesh-fpp10.so, and
+# install-time FPP-major detection places the correct one at the single
+# stable name this line resolves to. Selecting the adapter here instead
+# would duplicate version detection the installer already does, in a
+# script whose entire output budget is a 128-byte pipe read.
+#
+# fppd forks this script and reads stdout; it is not sourced. Keep the
+# output to the single token and write nothing else to stdout.
+printf 'c++'
