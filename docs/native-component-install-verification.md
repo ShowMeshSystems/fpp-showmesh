@@ -127,3 +127,53 @@ Re-run with one deliberate syntax error injected into the bundled source:
 - **fppd was not restarted into a running show.** The installer deliberately
   never restarts fppd; a newly activated object is only picked up on the
   operator's own reload.
+
+## End to end with a real coordinator: an observation was accepted
+
+Run 2026-08-24, after the install above, on the same containerized FPP 10.0
+with its normal web stack up. A coordinator built from `main` ran on the host
+with a `scheduler` principal and a minted bearer token; the plugin was pointed
+at it through `plugindata/fpp-showmesh/config.json` (`coordinatorUrl`) and the
+credential at `/etc/showmesh-fpp-plugin/credential`, mode 0600.
+
+One correction worth recording, because it cost a confusing cycle: fppd scans
+`/home/fpp/media/plugins` at start, so an in-place restart issued while the
+install was still finishing did not pick the plugin up, and the object sat on
+disk unmapped. Restarting the container is what loaded it. `grep libfpp-showmesh
+/proc/<fppd-pid>/maps` is the check that settles it, not the log, because the
+plugin load lines are debug level and absent at the default level.
+
+With the object mapped and `ShowMeshRunMacro` registered, starting a
+three-entry playlist produced an **accepted** observation:
+
+```
+instanceUuid  M4-460b33e3d3834e8ead463fc22ed265da
+playlistName  showmesh-obs   section MainPlaylist   position 2
+playlistHash  bad718796026194456b8b2fba02df18591579b36cfde4a0633617be1aba3884f
+entryKey      dd883c94081d03257cef9b96d6beb91a389299c3dd79fff2b289c77cbe896ff4
+sequence      6    action query_next    coalescedSincePreviousAcknowledged 0
+```
+
+Acceptance is the load-bearing part: the coordinator re-derives the entry key
+from the identity fields and refuses `400` when it disagrees, so an accepted
+observation means both sides computed the same key independently.
+
+The playlist definition was published as well and stored under the hash the
+coordinator computed for itself, with all three entries enumerated through the
+definition entries route.
+
+**The sequence survived an fppd restart.** Before the restart the persisted
+state held `8` in the primary and `7` in the backup, each with its own SHA-256.
+After a full restart the next accepted observation carried sequence `14`, above
+the pre-restart value, with the same `entryKey`. No `409`, and the coordinator
+log and audit recorded no refusal of any class.
+
+### Still not shown by this run
+
+- **Brightness state was never persisted here**, because nothing ever set a
+  ceiling or a gain, so there was nothing to write. That path has a unit
+  acceptance test but was not exercised on a host.
+- Still no real hardware, still a locally built fixture release rather than a
+  published one, and still no FPP 9 run of the install script's native path.
+- The coordinator ran without a broker. Nothing in this flow needs one, but a
+  full show path does.
