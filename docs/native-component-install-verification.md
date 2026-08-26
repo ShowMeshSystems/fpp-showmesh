@@ -111,12 +111,23 @@ Re-run with one deliberate syntax error injected into the bundled source:
 
 ## What this does not show
 
-- **No real hardware.** This is a container under x86_64-on-arm64 emulation, not
-  a Raspberry Pi. Compile duration on a Pi is unmeasured, and it is the one
-  number an operator will care about during an install window.
-- **No published release.** The fixture tarballs were built locally and hashed
-  into a scratch copy of `artifacts.lock.json`. The committed lock still holds
-  placeholder hashes, and a real install remains blocked on a real release.
+- **No real hardware.** This is a container, not a Raspberry Pi. The container
+  was native `arm64` rather than emulated: the install detected `arm64`, and
+  libcurl's header resolved at the `aarch64-linux-gnu` multiarch path. Native
+  is a stronger result than emulated, so it is recorded as what it was.
+  Compile duration on a Pi is still unmeasured, and it is the one number an
+  operator will care about during an install window. Treat any compile time
+  from this machine with suspicion in any case: the plugin repository's load
+  bench measured the same adapter compile at 26.8 s, 10.4 s, 46.3 s and 18.4 s
+  across runs on one host, a spread explained by other work running at the
+  same time rather than by anything about the compile.
+- **No published release.** The fixture tarballs for this run were built
+  locally and hashed into a scratch copy of `artifacts.lock.json`. The
+  committed lock has since been filled in with the real digests of the private
+  candidate build, so it is no longer placeholders, but those artifacts are
+  still unpublished: the default artifact host serves nothing for this
+  version, so a real install against the default host remains blocked on a
+  published release.
 - **No FPP 9 run of this path.** The adapter selection for major 9 is unit
   tested, and the FPP 9 adapter is exercised by the plugin repository's own
   load bench, but the install script's native path was not run end to end on a
