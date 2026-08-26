@@ -1,5 +1,5 @@
 {
-  "note": "Real digests for version 0.1.0, taken from the plugin repository's release-manifest.json for source commit 3fcf4c34e210. Regenerate this file from that manifest whenever a new release is cut; there is no tooling that does it automatically.",
+  "note": "Real digests for version 0.1.0, taken from the plugin repository's release-manifest.json for source commit 3fcf4c34e210. Those artifacts are a private candidate build, not a published release, so the default artifact host still serves nothing for this version; the digests are what a bench or a later publication of that same build must match. Regenerate this file from the manifest whenever a new release is cut; there is no tooling that does it automatically.",
   "version": "0.1.0",
   "artifacts": [
     { "filename": "showmesh-fpp-plugin_0.1.0_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "7423367b81423358057d3373c7a4af3c1ad519df6b8ca805f7c7a4e3de8f8d8a" },

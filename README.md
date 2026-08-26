@@ -93,6 +93,11 @@ separate bench-only code path to keep in sync with the real one.
 install pass.** `artifacts.lock.json` as committed to this repository
 carries the real `sha256` digests of one specific set of built artifacts
 (see the lock file's own `"note"` field for which build they came from).
+Those artifacts are a private candidate build rather than a published
+release, so this does not contradict the paragraph above: the default
+host still serves nothing for this version. Real digests mean the lock
+is a usable trust anchor for a bench that serves that exact build, and
+for the same build if it is published later.
 Verification is against this committed lock, never against anything
 fetched from the bench host itself (see "The artifact contract" above).
 So a bench install passes the checksum step only when the tarball the
