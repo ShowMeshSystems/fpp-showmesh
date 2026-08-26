@@ -114,20 +114,26 @@ separate bench-only code path to keep in sync with the real one.
 
 **Pointing this at a bench host is not, by itself, enough to make a bench
 install pass.** `artifacts.lock.json` as committed to this repository
-right now carries all-zero placeholder `sha256` values for every artifact
-(see the lock file's own `"note"` field), deliberately, so an install can
-never silently trust an unverified hash. Verification is against this
-committed lock, never against anything fetched from the bench host itself
-(see "The artifact contract" above), so a bench install against a real
-tarball fails the checksum check every time until the lock is
-regenerated for that tarball. There is no tooling in this repository that
-does that regeneration automatically; it means hand-editing
+carries the real `sha256` digests of one specific set of built artifacts
+(see the lock file's own `"note"` field for which build they came from).
+Those artifacts are a private candidate build rather than a published
+release, so this does not contradict the paragraph above: the default
+host still serves nothing for this version. Real digests mean the lock
+is a usable trust anchor for a bench that serves that exact build, and
+for the same build if it is published later.
+Verification is against this committed lock, never against anything
+fetched from the bench host itself (see "The artifact contract" above).
+So a bench install passes the checksum step only when the tarball the
+bench host serves is byte-for-byte the artifact the lock names, and fails
+it every time otherwise. There is no tooling in this repository that
+regenerates the lock automatically; it means hand-editing
 `artifacts.lock.json`'s `artifacts[]` array so each entry's `sha256` is
 the real digest of the bench tarball it names (`sha256sum` against the
 actual file the bench host serves, or the real per-artifact digest from
-whatever built and published that tarball) and its `version` matches the
-`VERSION` file at this repository's root. Do this before attempting a
-bench install, not after one fails confusingly on a checksum mismatch.
+the `release-manifest.json` of whatever built that tarball) and its
+`version` matches the `VERSION` file at this repository's root. Do this
+before attempting a bench install, not after one fails confusingly on a
+checksum mismatch.
 
 The override must still carry an explicit `http://` or `https://` scheme
 — a bare host with no scheme is rejected rather than silently mishandled.
