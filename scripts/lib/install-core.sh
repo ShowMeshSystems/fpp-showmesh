@@ -10,7 +10,14 @@
 # too, not only the binary.
 #
 # Requires common.sh, arch.sh, fetch.sh, verify.sh, commands.sh, lock.sh,
-# and activate.sh to already be sourced.
+# activate.sh, and native.sh to already be sourced. native.sh is the newest
+# of those and the easiest to miss: sm_install_or_upgrade calls
+# sm_install_native, and a caller that sources the other seven and not this
+# one gets an undefined function, which `if ! ...` reads as a failure and
+# then reports through sm_native_failure_marker_path, which is undefined
+# too. The result is a misleading message and an install that quietly never
+# placed the resident component. Keep this list and every caller's source
+# list in step.
 
 # Creates the plugin's credential directory/file and non-secret state
 # directory/files, without overwriting anything that already exists. This
@@ -497,6 +504,26 @@ sm_install_or_upgrade() {
     # partially activated. Set SM_REQUIRE_NATIVE=1 to make it fatal instead,
     # which is what a bench or a CI run that exists to prove the resident
     # component works should do.
+    # A caller that must not pay for an on-host compile sets SM_SKIP_NATIVE=1.
+    # preStart.sh does, because it runs at fppd startup and compiling the
+    # adapter there would block a boot for as long as the compile takes,
+    # which on a Pi is the one number nobody has measured yet. Skipping is
+    # said out loud rather than left silent: the macro helper is repaired,
+    # the resident component is not, and an operator has to run a real
+    # install or upgrade to get it back.
+    if [ "${SM_SKIP_NATIVE:-0}" = 1 ]; then
+        # Both set is a caller mistake, and skipping would be the dangerous
+        # reading of it: a bench or CI run that asked for the resident
+        # component would pass without one. Refuse instead of picking.
+        if [ "${SM_REQUIRE_NATIVE:-0}" = 1 ]; then
+            sm_log_err "SM_SKIP_NATIVE=1 and SM_REQUIRE_NATIVE=1 are contradictory; refusing to guess which was meant"
+            return 1
+        fi
+        sm_log "skipping the resident component on this path; run an install or upgrade to build and activate it"
+        sm_note_possible_restart_need
+        return 0
+    fi
+
     if ! sm_install_native "$_sm_plugin_dir" "$_sm_fppdir" "$_sm_version"; then
         if [ "${SM_REQUIRE_NATIVE:-0}" = 1 ]; then
             sm_log_err "the resident component failed to install and SM_REQUIRE_NATIVE=1; failing the install"

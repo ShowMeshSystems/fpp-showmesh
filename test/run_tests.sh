@@ -2426,6 +2426,58 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Entrypoint source lists
+# ---------------------------------------------------------------------------
+#
+# The bug this guards: sm_install_or_upgrade grew a call into native.sh, and
+# preStart.sh sourced install-core.sh's other seven dependencies but not that
+# one. An undefined function returns 127, `if ! ...` reads 127 as a failure
+# and takes the failure branch, and the branch then reports through another
+# undefined function, so the path logged a malformed message, never installed
+# the resident component, and still exited 0. Nothing failed loudly.
+#
+# So: every entrypoint that calls a library function must have sourced the
+# file defining it. Checked by static reading rather than by running the
+# entrypoints, which need a real FPP host.
+
+echo "== entrypoint source lists =="
+
+_sm_entrypoints="scripts/fpp_install.sh scripts/fpp_upgrade.sh scripts/preStart.sh"
+
+for _sm_entry in $_sm_entrypoints; do
+    _sm_entry_path="$_sm_repo_dir/$_sm_entry"
+    # Which lib/*.sh files this entrypoint sources.
+    _sm_sourced=$(grep -oE '\. "\$_sm_script_dir/lib/[a-z-]+\.sh"' "$_sm_entry_path" 2>/dev/null |
+        sed -E 's|.*/lib/([a-z-]+)\.sh"|\1|' | sort -u | tr '\n' ' ')
+
+    # Every sm_* function this entrypoint calls, plus every sm_* function the
+    # libraries it sources go on to call, resolved one level deep through
+    # install-core.sh, which is where the orchestration lives.
+    _sm_called=$(cat "$_sm_entry_path" "$_sm_repo_dir/scripts/lib/install-core.sh" 2>/dev/null |
+        grep -vE '^[[:space:]]*#' |
+        grep -oE '\bsm_[a-z0-9_]+' | sort -u)
+
+    _sm_missing=""
+    for _sm_fn in $_sm_called; do
+        # Where is it defined?
+        _sm_def_file=$(grep -lE "^${_sm_fn}\(\)" "$_sm_repo_dir"/scripts/lib/*.sh 2>/dev/null | head -1)
+        [ -n "$_sm_def_file" ] || continue
+        _sm_def_base=$(basename "$_sm_def_file" .sh)
+        case " $_sm_sourced " in
+            *" $_sm_def_base "*) ;;
+            *) _sm_missing="$_sm_missing $_sm_fn(lib/$_sm_def_base.sh)" ;;
+        esac
+    done
+
+    if [ -z "$_sm_missing" ]; then
+        pass "$_sm_entry sources every lib file whose functions it reaches"
+    else
+        fail "$_sm_entry sources every lib file whose functions it reaches" \
+            "calls these without sourcing their definition:$_sm_missing"
+    fi
+done
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
