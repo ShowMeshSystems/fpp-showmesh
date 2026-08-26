@@ -469,7 +469,7 @@ sm_note_possible_restart_need() {
 
 # $1 = FPPDIR (already defaulted), $2 = plugin directory, $3 = version
 sm_install_or_upgrade() {
-    local _sm_fppdir _sm_plugin_dir _sm_version
+    local _sm_fppdir _sm_plugin_dir _sm_version _sm_marker
     _sm_fppdir="$1"
     _sm_plugin_dir="$2"
     _sm_version="$3"
@@ -502,7 +502,16 @@ sm_install_or_upgrade() {
             sm_log_err "the resident component failed to install and SM_REQUIRE_NATIVE=1; failing the install"
             return 1
         fi
-        sm_log_err "the resident component is NOT installed on this host; the macro helper is installed and working. See $(sm_native_failure_marker_path) for the reason."
+        # Point at the marker only if it is actually there. sm_native_record_failure
+        # reports its own write failure and carries on, so on a state directory
+        # that is read-only or full the operator would otherwise be told the
+        # marker could not be written and then told to go read it.
+        _sm_marker=$(sm_native_failure_marker_path)
+        if [ -f "$_sm_marker" ]; then
+            sm_log_err "the resident component is NOT installed on this host; the macro helper is installed and working. See $_sm_marker for the reason."
+        else
+            sm_log_err "the resident component is NOT installed on this host; the macro helper is installed and working. The reason could not be recorded at $_sm_marker, so it is in this install log only."
+        fi
     fi
 
     sm_note_possible_restart_need

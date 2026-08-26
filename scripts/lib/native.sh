@@ -61,12 +61,14 @@ sm_fpp_major() {
     _sm_sed=$(sm_resolve_bin sed /bin/sed /usr/bin/sed) || return 1
 
     # Matches the generated body of getFPPMajorVersion(), which returns a
-    # quoted integer. Anchored on the function name so an unrelated return
-    # elsewhere in the file cannot be picked up. The `q` quits sed on the first
-    # match rather than piping through `head`, which would mean a second
-    # external tool resolved by absolute path for no gain.
+    # quoted integer. The opening parenthesis is part of the address pattern
+    # so the name is matched in full: without it the address also opens on any
+    # same-prefix function such as getFPPMajorVersionExtras, and a file that
+    # defined one BEFORE the real function would hand back that function's
+    # digit instead, since only the first line of the output is kept below.
+    # An unrelated return elsewhere in the file still cannot be picked up.
     _sm_major=$("$_sm_sed" -n \
-        '/function[[:space:]]*getFPPMajorVersion/,/}/ { s/.*return[[:space:]]*"\{0,1\}\([0-9]\{1,\}\)"\{0,1\}[[:space:]]*;.*/\1/p ; }' \
+        '/function[[:space:]]*getFPPMajorVersion[[:space:]]*(/,/}/ { s/.*return[[:space:]]*"\{0,1\}\([0-9]\{1,\}\)"\{0,1\}[[:space:]]*;.*/\1/p ; }' \
         "$_sm_version_php")
     # Only the first line, without invoking anything: a generated file with an
     # unexpected second match must not silently concatenate into one token.
