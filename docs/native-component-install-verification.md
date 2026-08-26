@@ -11,14 +11,28 @@ hardware; see "What this does not show".
 
 ## What FPP actually does with a plugin, read from source
 
-Both release tags were cloned and read directly, because the previously
-recorded rationale for shipping no root `Makefile` turned out to describe
-behaviour neither version has.
+Both release tags were read directly. An earlier revision of this document
+claimed the recorded rationale for shipping no root `Makefile` described
+behaviour neither version has. **That claim was wrong and is corrected here**,
+verified by reading `scripts/functions` inside the running FPP 9.5.3 and
+FPP 10.0 images rather than by grepping for the word `Makefile`.
 
-- FPP 10.0 (`370e62ed7e8c8318da6ee5b01312b8b75082d952`) and FPP 9.5.3
-  (`7979a4bb0bb9068fea71f3b447e273d5c0ea01e3`) contain **no** code that runs
-  `make` on a plugin directory. Every `Makefile` reference in either tree is
-  BeagleBone cape-overlay or WiFi-driver work.
+- **FPP does compile plugin directories that contain a `Makefile`, on both
+  versions.** `compileBinaries()` loops `${MEDIADIR}/plugins/*` and, for each
+  directory holding a `Makefile`, runs
+  `make -C "${p}" -f "${p}/Makefile" -j ${CPUS} SRCDIR=${FPPDIR}/src`, then
+  `chown -R` over that plugin directory. `cleanCompiledBinaries()` runs the
+  same loop with `clean`. Observed at `scripts/functions:515` and `:59` on
+  FPP 10.0 (`370e62ed7e8c8318da6ee5b01312b8b75082d952`) and at `:667` and
+  `:481` on FPP 9.5.3 (`7979a4bb0bb9068fea71f3b447e273d5c0ea01e3`).
+  `compileBinaries` is called from `scripts/upgrade_FPP`, `scripts/git_pull`
+  and `scripts/git_branch`, so the trigger is a core upgrade.
+- So the original rationale was right, and the design conclusion it was used
+  to justify is unchanged and now better founded: this repository ships no
+  root `Makefile`, because one would hand FPP an unverified second way to
+  produce a binary here, on its schedule rather than the installer's. The
+  resident component is compiled by this plugin's own install script instead,
+  which is a different hook entirely.
 - `www/api/controllers/plugin.php` resolves `scripts/fpp_install.sh`, falling
   back to a root `fpp_install.sh`. On FPP 10 the post-pull step runs
   `fpp_upgrade.sh` if present, else `fpp_install.sh`. FPP 9.5.3 has no

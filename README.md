@@ -21,17 +21,30 @@ policy — lives in a separately built Go binary that this repository's
 repository does not contain that source and is not where a change to that
 behavior belongs.
 
-There is also no root `Makefile` here, and the reason recorded earlier for
-that was wrong. It said FPP recompiles every plugin directory containing a
-`Makefile` on every core upgrade, which would race the Go binary. Neither
-FPP 9.5.3 (`7979a4bb0bb9068fea71f3b447e273d5c0ea01e3`) nor FPP 10.0
-(`370e62ed7e8c8318da6ee5b01312b8b75082d952`) contains any code that runs
-`make` on a plugin directory; every `Makefile` reference in either tree is
-BeagleBone cape-overlay or WiFi-driver work. There is no root `Makefile`
-because nothing needs one, not because one would be dangerous.
+There is also no root `Makefile` here, and the original reason for that was
+correct: FPP really does compile any plugin directory that contains one, on
+every core upgrade.
 
-What FPP actually runs is this plugin's own scripts, and that is the
-compile hook by design: `www/api/controllers/plugin.php` resolves
+`compileBinaries()` in `scripts/functions` loops `${MEDIADIR}/plugins/*` and,
+for each directory holding a `Makefile`, runs
+`make -C "${p}" -f "${p}/Makefile" -j ${CPUS} SRCDIR=${FPPDIR}/src`, then
+`chown -R` over that whole plugin directory. `cleanCompiledBinaries()` runs
+the same loop with `clean`. Both are present in FPP 9.5.3
+(`7979a4bb0bb9068fea71f3b447e273d5c0ea01e3`, `scripts/functions:667` and
+`:481`) and FPP 10.0 (`370e62ed7e8c8318da6ee5b01312b8b75082d952`,
+`scripts/functions:515` and `:59`), and `compileBinaries` is reached from
+`scripts/upgrade_FPP`, `scripts/git_pull` and `scripts/git_branch`, which are
+the core-upgrade paths.
+
+So adding a root `Makefile` here would opt this plugin into FPP building it
+on every core upgrade, against that host's `SRCDIR`, with no say over when.
+For a repository whose binary is fetched prebuilt and verified against a
+committed digest, that is a second, unverified way for a binary to appear.
+Do not add one.
+
+None of that changes where the resident component is compiled, because the
+compile hook this repository uses is a different mechanism: FPP runs this
+plugin's own scripts, by design. `www/api/controllers/plugin.php` resolves
 `scripts/fpp_install.sh` (falling back to a root `fpp_install.sh`), and on
 FPP 10 the post-pull step runs `fpp_upgrade.sh` if present, else
 `fpp_install.sh`. FPP 9.5.3 has no `fpp_upgrade.sh` handling at all.
