@@ -1,10 +1,10 @@
 {
-  "note": "Real digests for version 0.1.0, taken from the plugin repository's release-manifest.json for source commit 3fcf4c34e210. Those artifacts are a private candidate build, not a published release, so the default artifact host still serves nothing for this version; the digests are what a bench or a later publication of that same build must match. Regenerate this file from the manifest whenever a new release is cut; there is no tooling that does it automatically.",
-  "version": "0.1.0",
+  "note": "Real digests for version 0.1.1, taken from the plugin repository's release-manifest.json for source commit 209e3dd9b321. Those artifacts are a private candidate build, not a published release, so the default artifact host still serves nothing for this version; the digests are what a bench or a later publication of that same build must match. Regenerate this file from the manifest whenever a new release is cut; there is no tooling that does it automatically.",
+  "version": "0.1.1",
   "artifacts": [
-    { "filename": "showmesh-fpp-plugin_0.1.0_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "7423367b81423358057d3373c7a4af3c1ad519df6b8ca805f7c7a4e3de8f8d8a" },
-    { "filename": "showmesh-fpp-plugin_0.1.0_linux_arm64.tar.gz", "kind": "go-helper", "architecture": "arm64", "sha256": "5d1dda8565e19899891647026149358fec77da39b7ffeceac8461917234f4a84" },
-    { "filename": "showmesh-fpp-plugin_0.1.0_linux_armv7.tar.gz", "kind": "go-helper", "architecture": "armv7", "sha256": "aca1e4995c5abd6de9672deaa8f0bc77f56d72746af7d51cd8b45f7a1a019e3b" },
-    { "filename": "showmesh-fpp-plugin-native_0.1.0.tar.gz", "kind": "native-source", "architecture": "any", "sha256": "cd77b16fbc37be21d0f343b40e30752af70bd1757392b2b1b70d99bf080602ff" }
+    { "filename": "showmesh-fpp-plugin_0.1.1_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "e955bb6006da445a70f921045983b2d7c91e3d0b718acc06819ffb5c3786cf86" },
+    { "filename": "showmesh-fpp-plugin_0.1.1_linux_arm64.tar.gz", "kind": "go-helper", "architecture": "arm64", "sha256": "f0f43c9ea6fca8d11d0491799bca5a6f80d8dd8a322d212f16fd5df258db122b" },
+    { "filename": "showmesh-fpp-plugin_0.1.1_linux_armv7.tar.gz", "kind": "go-helper", "architecture": "armv7", "sha256": "fbc7bf32eb5d78429df137db6ff7aafaf92a9328c29e9eeea79d056ecbda82ef" },
+    { "filename": "showmesh-fpp-plugin-native_0.1.1.tar.gz", "kind": "native-source", "architecture": "any", "sha256": "d424c44b7be6e20b961137e62685cfc3af55e3e9167f4a38e381877490241f89" }
   ]
 }
