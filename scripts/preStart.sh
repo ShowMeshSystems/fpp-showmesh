@@ -59,13 +59,17 @@ fi
 sm_log "repair needed: $_sm_repair_reason"
 
 # install-core.sh's own dependencies (verify.sh, fetch.sh, commands.sh,
-# lock.sh, activate.sh) sourced before the network repair below, since
-# they are only function definitions and local file reads.
+# lock.sh, activate.sh, native.sh) sourced before the network repair below,
+# since they are only function definitions and local file reads. native.sh
+# is sourced even though this path deliberately skips the compile below:
+# sm_install_or_upgrade calls into it either way, and leaving it out makes
+# that call an undefined function rather than a skipped step.
 . "$_sm_script_dir/lib/verify.sh"
 . "$_sm_script_dir/lib/fetch.sh"
 . "$_sm_script_dir/lib/commands.sh"
 . "$_sm_script_dir/lib/lock.sh"
 . "$_sm_script_dir/lib/activate.sh"
+. "$_sm_script_dir/lib/native.sh"
 . "$_sm_script_dir/lib/install-core.sh"
 
 _sm_version_file="$_sm_plugin_dir/VERSION"
@@ -83,6 +87,15 @@ _sm_version=$("$_sm_tr" -d ' \t\r\n' < "$_sm_version_file")
 SM_DOWNLOAD_CONNECT_TIMEOUT="${SM_DOWNLOAD_CONNECT_TIMEOUT:-5}"
 SM_DOWNLOAD_MAX_TIME="${SM_DOWNLOAD_MAX_TIME:-15}"
 export SM_DOWNLOAD_CONNECT_TIMEOUT SM_DOWNLOAD_MAX_TIME
+
+# The same budget argument applied to the on-host compile, which has no
+# timeout to tighten. This script blocks fppd starting, and building the
+# adapter takes tens of seconds in a container and an unmeasured amount of
+# time on a Pi. A boot is the wrong place to find that out, so the repair
+# here restores the macro helper and says plainly that the resident
+# component still needs a real install or upgrade.
+SM_SKIP_NATIVE=1
+export SM_SKIP_NATIVE
 
 # The full install/upgrade path, not just the binary fetch: a repair that
 # only replaced the binary would never re-scaffold the credential and
