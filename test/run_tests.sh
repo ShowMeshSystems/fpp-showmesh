@@ -812,6 +812,87 @@ status=$?
 assert_success "sm_lock_sha256 succeeds with an empty PATH (every tool it uses is resolved to an absolute path)" "$status"
 assert_eq "the lookup still returns the correct hash with an empty PATH" "$_sm_hash_amd64" "$out"
 
+echo "== artifact-lock-path override resolution =="
+
+# sm_state_dir is a hardcoded host path in production; redirected here so
+# the override file can be written under the test's own tmp directory,
+# same pattern the sm_artifact_base_url tests use above.
+_sm_alp_statedir="$_sm_tmp/artifact-lock-path-state"
+mkdir -p "$_sm_alp_statedir"
+sm_state_dir() {
+    printf '%s\n' "$_sm_alp_statedir"
+}
+_sm_alp_override_file=$(sm_lock_override_file)
+rm -f "$_sm_alp_override_file"
+
+out=$(sm_lock_expected_sha256 "$_sm_lockdir" "1.2.3" "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz" 2>"$_sm_tmp/lock-noalp.err")
+status=$?
+assert_success "no override file: sm_lock_expected_sha256 still succeeds" "$status"
+assert_eq "no override file: the committed lock's digest is used unchanged" "$_sm_hash_amd64" "$out"
+assert_contains "no override file: the log names the committed lock's resolved path" \
+    "$(cat "$_sm_tmp/lock-noalp.err")" "using committed lock at $_sm_lockdir/artifacts.lock.json"
+
+_sm_alp_lockdir="$_sm_tmp/artifact-lock-path-operator"
+mkdir -p "$_sm_alp_lockdir"
+_sm_alp_hash=$(python3 -c "print('c' * 64)")
+cat > "$_sm_alp_lockdir/operator.lock.json" <<JSON
+{
+  "version": "1.2.3",
+  "artifacts": [
+    { "filename": "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "$_sm_alp_hash" }
+  ]
+}
+JSON
+printf '%s\n' "$_sm_alp_lockdir/operator.lock.json" > "$_sm_alp_override_file"
+
+out=$(sm_lock_expected_sha256 "$_sm_lockdir" "1.2.3" "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz" 2>"$_sm_tmp/lock-alp-valid.err")
+status=$?
+assert_success "a valid override lock: sm_lock_expected_sha256 succeeds" "$status"
+assert_eq "a valid override lock: the operator's digest wins over the committed lock's" "$_sm_alp_hash" "$out"
+assert_contains "a valid override lock: the log names its resolved path, not the committed lock's" \
+    "$(cat "$_sm_tmp/lock-alp-valid.err")" "using operator lock at $_sm_alp_lockdir/operator.lock.json"
+
+printf '%s\n' "$_sm_alp_lockdir/does-not-exist.json" > "$_sm_alp_override_file"
+out=$(sm_lock_expected_sha256 "$_sm_lockdir" "1.2.3" "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz" 2>&1)
+status=$?
+assert_failure "an override naming a missing file fails hard, not a silent fallback to the committed lock" "$status"
+assert_contains "the missing-override refusal names the path it could not read" "$out" "does-not-exist.json"
+
+if [ "$(id -u)" -eq 0 ]; then
+    skip "an override naming an unreadable file fails hard" "running as root; chmod 000 has no effect, cannot exercise this case here"
+else
+    _sm_alp_unreadable="$_sm_alp_lockdir/unreadable.lock.json"
+    cp "$_sm_alp_lockdir/operator.lock.json" "$_sm_alp_unreadable"
+    chmod 000 "$_sm_alp_unreadable"
+    printf '%s\n' "$_sm_alp_unreadable" > "$_sm_alp_override_file"
+    out=$(sm_lock_expected_sha256 "$_sm_lockdir" "1.2.3" "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz" 2>&1)
+    status=$?
+    assert_failure "an override naming an unreadable file fails hard, not a silent fallback to the committed lock" "$status"
+    chmod 644 "$_sm_alp_unreadable"
+fi
+
+printf '%s\n' "relative/path.json" > "$_sm_alp_override_file"
+out=$(sm_lock_expected_sha256 "$_sm_lockdir" "1.2.3" "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz" 2>&1)
+status=$?
+assert_failure "an override with a non-absolute path is refused" "$status"
+assert_contains "the non-absolute refusal names the offending value" "$out" "relative/path.json"
+
+_sm_alp_malformed="$_sm_alp_lockdir/malformed.lock.json"
+cat > "$_sm_alp_malformed" <<JSON
+{
+  "version": "9.9.9",
+  "artifacts": [
+    { "filename": "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "$_sm_alp_hash" }
+  ]
+}
+JSON
+printf '%s\n' "$_sm_alp_malformed" > "$_sm_alp_override_file"
+out=$(sm_lock_expected_sha256 "$_sm_lockdir" "1.2.3" "showmesh-fpp-plugin_1.2.3_linux_amd64.tar.gz" 2>&1)
+status=$?
+assert_failure "an override lock pinned to a different version is refused, the same way a mismatched committed lock is" "$status"
+
+rm -f "$_sm_alp_override_file"
+
 # ---------------------------------------------------------------------------
 # Command script validation
 # ---------------------------------------------------------------------------

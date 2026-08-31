@@ -150,26 +150,49 @@ whitespace-only content is treated the same as the file being absent.
 
 **Pointing this at a bench host is not, by itself, enough to make a bench
 install pass.** `artifacts.lock.json` as committed to this repository
-carries the real `sha256` digests of one specific set of built artifacts
-(see the lock file's own `"note"` field for which build they came from).
-Those artifacts are a private candidate build rather than a published
-release, so this does not contradict the paragraph above: the default
-host still serves nothing for this version. Real digests mean the lock
-is a usable trust anchor for a bench that serves that exact build, and
-for the same build if it is published later.
-Verification is against this committed lock, never against anything
-fetched from the bench host itself (see "The artifact contract" above).
-So a bench install passes the checksum step only when the tarball the
-bench host serves is byte-for-byte the artifact the lock names, and fails
-it every time otherwise. There is no tooling in this repository that
-regenerates the lock automatically; it means hand-editing
-`artifacts.lock.json`'s `artifacts[]` array so each entry's `sha256` is
-the real digest of the bench tarball it names (`sha256sum` against the
-actual file the bench host serves, or the real per-artifact digest from
-the `release-manifest.json` of whatever built that tarball) and its
-`version` matches the `VERSION` file at this repository's root. Do this
-before attempting a bench install, not after one fails confusingly on a
-checksum mismatch.
+records the exact filename and SHA-256 of one specific published build
+(see the lock file's own `"note"` field for which build it is). A rebuild
+from source is not guaranteed to reproduce those digests byte for byte,
+so an operator installing their own locally built artifacts needs the
+installer to verify against digests of their own build, not the
+committed ones, without editing anything inside the checkout.
+
+### Installing a locally built artifact (bench path)
+
+`sm_lock_path` in `scripts/lib/lock.sh` checks an override file before
+falling back to the committed lock:
+`$(sm_state_dir)/artifact-lock-path`, which on a stock host is
+`/home/fpp/media/plugindata/fpp-showmesh/artifact-lock-path`. Its only
+content is the absolute path to an operator-maintained lock file, in the
+same `version`/`artifacts[]` shape as `artifacts.lock.json` and read by
+the same `scripts/lib/lock.sh` code, no separate bench-only verification
+path. Verification itself never weakens: the installer still refuses any
+tarball whose bytes do not match a `sha256` entry in whichever lock is in
+effect. Only which digests are trusted moves.
+
+An operator builds their own artifacts, writes a lock file naming their
+real digests (`sha256sum` against each tarball, or the digests from that
+build's own manifest) to any path outside this repository's checkout,
+then points the override file at it:
+
+```
+vi /home/fpp/media/artifacts.lock.bench.json   # version + artifacts[] entries
+mkdir -p /home/fpp/media/plugindata/fpp-showmesh
+printf '%s' /home/fpp/media/artifacts.lock.bench.json \
+    > /home/fpp/media/plugindata/fpp-showmesh/artifact-lock-path
+```
+
+before installing or upgrading through FPP's Plugin Manager. Point
+`SHOWMESH_PLUGIN_ARTIFACT_BASE_URL` or the `artifact-base-url` override
+file at the bench host too, as above; this only changes which digests are
+trusted, not which host is fetched from.
+
+The override file naming a path that does not exist or is not readable
+is a hard install failure, not a silent fallback to the committed lock.
+With no override file present, install and upgrade behave exactly as
+they do without this section. Every install and upgrade logs the
+resolved absolute path of the lock actually read, committed or operator-
+supplied, so which anchor was used is never left to be inferred.
 
 The override must still carry an explicit `http://` or `https://` scheme
 — a bare host with no scheme is rejected rather than silently mishandled.
