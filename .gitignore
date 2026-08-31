@@ -18,3 +18,7 @@
 /.installed-arch.tmp
 /.installed-sha256.tmp
 /.installed-version.tmp
+
+# test/php_tests.sh's fixture directories, created and removed by that
+# script itself; only survive a crash mid-run.
+/.php-test-tmp.*
