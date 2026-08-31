@@ -28,9 +28,44 @@
 #
 # Requires scripts/lib/common.sh to already be sourced.
 
+sm_lock_override_file() {
+    printf '%s\n' "$(sm_state_dir)/artifact-lock-path"
+}
+
+# Resolves which lock file to trust; never calls sm_log, since its own
+# stdout is the returned path. A present override naming a missing or
+# unreadable file is refused, not silently ignored in favor of the lock.
 sm_lock_path() {
     # $1 = plugin directory
-    printf '%s\n' "$1/artifacts.lock.json"
+    local _sm_plugin_dir _sm_override_file _sm_tr _sm_first_line _sm_override_path _sm_default
+    _sm_plugin_dir="$1"
+    _sm_override_file=$(sm_lock_override_file)
+
+    if [ -f "$_sm_override_file" ]; then
+        _sm_first_line=""
+        IFS= read -r _sm_first_line < "$_sm_override_file" || true
+        _sm_tr=$(sm_resolve_bin tr /usr/bin/tr /bin/tr) || return 1
+        _sm_override_path=$(printf '%s' "$_sm_first_line" | "$_sm_tr" -d ' \t\r\n')
+        if [ -n "$_sm_override_path" ]; then
+            case "$_sm_override_path" in
+                /*)
+                    ;;
+                *)
+                    sm_log_err "artifact-lock-path override at $_sm_override_file names a non-absolute path: $_sm_override_path; refusing"
+                    return 1
+                    ;;
+            esac
+            if [ ! -f "$_sm_override_path" ] || [ ! -r "$_sm_override_path" ]; then
+                sm_log_err "artifact-lock-path override at $_sm_override_file names $_sm_override_path, which does not exist or is not a readable file; refusing rather than falling back to the committed lock"
+                return 1
+            fi
+            printf '%s\n' "$_sm_override_path"
+            return 0
+        fi
+    fi
+
+    _sm_default="$_sm_plugin_dir/artifacts.lock.json"
+    printf '%s\n' "$_sm_default"
 }
 
 # Prints the lock file's top-level "version" field.
@@ -132,11 +167,11 @@ sm_lock_sha256() {
     _sm_count=$(printf '%s\n' "$_sm_objects" | "$_sm_grep" -Fo "$_sm_marker" | "$_sm_grep" -Fc "$_sm_marker" 2>/dev/null)
     _sm_count="${_sm_count:-0}"
     if [ "$_sm_count" -eq 0 ]; then
-        sm_log_err "artifacts.lock.json has no entry for $_sm_filename"
+        sm_log_err "$_sm_lock_file has no entry for $_sm_filename"
         return 1
     fi
     if [ "$_sm_count" -gt 1 ]; then
-        sm_log_err "artifacts.lock.json has $_sm_count entries naming $_sm_filename; refusing an ambiguous lock rather than picking one"
+        sm_log_err "$_sm_lock_file has $_sm_count entries naming $_sm_filename; refusing an ambiguous lock rather than picking one"
         return 1
     fi
 
@@ -166,14 +201,14 @@ sm_lock_sha256() {
 
     if [ "$_sm_sha_count" -eq 0 ]; then
         if printf '%s\n' "$_sm_object" | "$_sm_grep" -q '"sha256"'; then
-            sm_log_err "artifacts.lock.json entry for $_sm_filename has a \"sha256\" field that does not come after \"filename\" in the source text; refusing a lock this parser cannot read unambiguously rather than guessing at a different key order"
+            sm_log_err "$_sm_lock_file entry for $_sm_filename has a \"sha256\" field that does not come after \"filename\" in the source text; refusing a lock this parser cannot read unambiguously rather than guessing at a different key order"
         else
-            sm_log_err "artifacts.lock.json entry for $_sm_filename has no sha256 field"
+            sm_log_err "$_sm_lock_file entry for $_sm_filename has no sha256 field"
         fi
         return 1
     fi
     if [ "$_sm_sha_count" -gt 1 ]; then
-        sm_log_err "artifacts.lock.json entry for $_sm_filename has $_sm_sha_count \"sha256\" fields within its own entry (possibly one nested inside another key); refusing an ambiguous lock rather than picking one"
+        sm_log_err "$_sm_lock_file entry for $_sm_filename has $_sm_sha_count \"sha256\" fields within its own entry (possibly one nested inside another key); refusing an ambiguous lock rather than picking one"
         return 1
     fi
 
@@ -202,7 +237,7 @@ sm_lock_sha256() {
     _sm_sha_opens=$(printf '%s' "$_sm_sha_before" | "$_sm_tr" -dc '{')
     _sm_sha_closes=$(printf '%s' "$_sm_sha_before" | "$_sm_tr" -dc '}')
     if [ "${#_sm_sha_opens}" -gt "${#_sm_sha_closes}" ]; then
-        sm_log_err "artifacts.lock.json entry for $_sm_filename has its only \"sha256\" field nested inside another key, not at the entry's own level; refusing rather than treating it as the entry's hash"
+        sm_log_err "$_sm_lock_file entry for $_sm_filename has its only \"sha256\" field nested inside another key, not at the entry's own level; refusing rather than treating it as the entry's hash"
         return 1
     fi
 
@@ -216,12 +251,12 @@ sm_lock_sha256() {
     # "$_sm_hash" could not tell apart from this case, described
     # something that was not actually true about the source text.
     if [ -z "$_sm_hash" ]; then
-        sm_log_err "artifacts.lock.json entry for $_sm_filename has an empty sha256 value"
+        sm_log_err "$_sm_lock_file entry for $_sm_filename has an empty sha256 value"
         return 1
     fi
 
     if ! printf '%s' "$_sm_hash" | "$_sm_grep" -Eq '^[0-9a-f]{64}$'; then
-        sm_log_err "artifacts.lock.json entry for $_sm_filename has a malformed sha256 value: $_sm_hash"
+        sm_log_err "$_sm_lock_file entry for $_sm_filename has a malformed sha256 value: $_sm_hash"
         return 1
     fi
 
@@ -239,11 +274,18 @@ sm_lock_expected_sha256() {
     _sm_plugin_dir="$1"
     _sm_version="$2"
     _sm_filename="$3"
-    _sm_lock_file=$(sm_lock_path "$_sm_plugin_dir")
+    _sm_lock_file=$(sm_lock_path "$_sm_plugin_dir") || return 1
+    # Logged to stderr: this function's own return value is the hash,
+    # read from stdout via command substitution, and sm_log writes stdout.
+    if [ "$_sm_lock_file" = "$_sm_plugin_dir/artifacts.lock.json" ]; then
+        sm_log "using committed lock at $_sm_lock_file" >&2
+    else
+        sm_log "using operator lock at $_sm_lock_file (via $(sm_lock_override_file))" >&2
+    fi
 
     _sm_lock_version=$(sm_lock_version "$_sm_lock_file") || return 1
     if [ "$_sm_lock_version" != "$_sm_version" ]; then
-        sm_log_err "artifacts.lock.json is pinned to version $_sm_lock_version, but this install is for $_sm_version; refusing rather than trusting a lock for a different release"
+        sm_log_err "$_sm_lock_file is pinned to version $_sm_lock_version, but this install is for $_sm_version; refusing rather than trusting a lock for a different release"
         return 1
     fi
 
