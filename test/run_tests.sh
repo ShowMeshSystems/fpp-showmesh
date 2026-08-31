@@ -962,6 +962,48 @@ out=$(sm_check_base_url_scheme "ftp://example.invalid/release" 2>&1)
 status=$?
 assert_failure "a base URL with an unrecognized scheme is rejected" "$status"
 
+echo "== sm_artifact_base_url override resolution =="
+
+# sm_state_dir is a hardcoded host path in production; redirected here so
+# the override file can be written under the test's own tmp directory.
+_sm_abu_statedir="$_sm_tmp/artifact-base-url-state"
+mkdir -p "$_sm_abu_statedir"
+sm_state_dir() {
+    printf '%s\n' "$_sm_abu_statedir"
+}
+_sm_abu_file=$(sm_artifact_base_url_file)
+
+SHOWMESH_PLUGIN_ARTIFACT_BASE_URL="${SHOWMESH_PLUGIN_ARTIFACT_BASE_URL:-}"
+export SHOWMESH_PLUGIN_ARTIFACT_BASE_URL
+
+rm -f "$_sm_abu_file"
+out=$(sm_artifact_base_url "9.9.9")
+assert_eq "no override file falls back to the pinned default host" \
+    "https://github.com/ShowMeshSystems/showmesh/releases/download/fpp-plugin-v9.9.9" "$out"
+
+printf 'https://bench.example.invalid/artifacts\n' > "$_sm_abu_file"
+out=$(sm_artifact_base_url "9.9.9")
+assert_eq "an override file wins over the default host" \
+    "https://bench.example.invalid/artifacts" "$out"
+
+SHOWMESH_PLUGIN_ARTIFACT_BASE_URL="https://env.example.invalid/artifacts"
+out=$(sm_artifact_base_url "9.9.9")
+assert_eq "the environment variable wins over the override file" \
+    "https://env.example.invalid/artifacts" "$out"
+SHOWMESH_PLUGIN_ARTIFACT_BASE_URL=""
+
+printf '   \n\t\n' > "$_sm_abu_file"
+out=$(sm_artifact_base_url "9.9.9")
+assert_eq "a whitespace-only override file is treated as absent" \
+    "https://github.com/ShowMeshSystems/showmesh/releases/download/fpp-plugin-v9.9.9" "$out"
+
+printf 'https://a.example.invalid\nhttps://b.example.invalid\n' > "$_sm_abu_file"
+out=$(sm_artifact_base_url "9.9.9")
+assert_eq "a two-line override file uses the first line only" \
+    "https://a.example.invalid" "$out"
+
+rm -f "$_sm_abu_file"
+
 # ---------------------------------------------------------------------------
 # Mode verification
 # ---------------------------------------------------------------------------

@@ -3,10 +3,11 @@
 #
 # The naming scheme, the tag format, and the default host are pinned across
 # this repo and the repository that builds and publishes the binary; do not
-# change them independently here. Only the host is meant to vary, and only
-# through SHOWMESH_PLUGIN_ARTIFACT_BASE_URL — the bench uses that override to
-# point at a local or test host, and everything else (filenames, manifest
-# format, verification) is identical between bench and shipped.
+# change them independently here. Only the host is meant to vary, via
+# SHOWMESH_PLUGIN_ARTIFACT_BASE_URL or the override file sm_artifact_base_url
+# resolves (see that function for the order between them). The bench uses
+# either to point at a local or test host; everything else (filenames,
+# manifest format, verification) is identical between bench and shipped.
 #
 # Requires scripts/lib/common.sh to already be sourced.
 
@@ -15,13 +16,34 @@ sm_artifact_tarball_name() {
     printf 'showmesh-fpp-plugin_%s_linux_%s.tar.gz\n' "$1" "$2"
 }
 
+sm_artifact_base_url_file() {
+    printf '%s\n' "$(sm_state_dir)/artifact-base-url"
+}
+
+# Same order sm_fppdir uses for FPPDIR: environment first (still exported
+# on upgrade via sudo -E), then the override file (survives a fresh
+# install's plain sudo, unlike the environment), then the pinned default.
 sm_artifact_base_url() {
     # $1 = version
+    local _sm_file _sm_tr _sm_first_line _sm_from_file
     if [ -n "$SHOWMESH_PLUGIN_ARTIFACT_BASE_URL" ]; then
         printf '%s\n' "$SHOWMESH_PLUGIN_ARTIFACT_BASE_URL"
-    else
-        printf 'https://github.com/ShowMeshSystems/showmesh/releases/download/fpp-plugin-v%s\n' "$1"
+        return 0
     fi
+
+    _sm_file=$(sm_artifact_base_url_file)
+    if [ -f "$_sm_file" ]; then
+        _sm_first_line=""
+        IFS= read -r _sm_first_line < "$_sm_file" || true
+        _sm_tr=$(sm_resolve_bin tr /usr/bin/tr /bin/tr) || return 1
+        _sm_from_file=$(printf '%s' "$_sm_first_line" | "$_sm_tr" -d ' \t\r\n')
+        if [ -n "$_sm_from_file" ]; then
+            printf '%s\n' "$_sm_from_file"
+            return 0
+        fi
+    fi
+
+    printf 'https://github.com/ShowMeshSystems/showmesh/releases/download/fpp-plugin-v%s\n' "$1"
 }
 
 # The installer's actual trust gate no longer fetches a checksum manifest

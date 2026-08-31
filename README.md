@@ -118,12 +118,35 @@ Publication is enabled when the plugin first targets real hardware.
 
 ### The bench override
 
-`SHOWMESH_PLUGIN_ARTIFACT_BASE_URL`, if set, replaces the default host
-above. This is how a bench environment points the installer at a local or
-test artifact host instead of a public release. **Only the host varies.**
-The filenames, the tag format, the manifest format, and the verification
-step are identical whether this variable is set or not — there is no
-separate bench-only code path to keep in sync with the real one.
+The default host above can be replaced two ways, checked in this order:
+`SHOWMESH_PLUGIN_ARTIFACT_BASE_URL`, then an override file, then the
+pinned default if neither is set. **Only the host varies.** The filenames,
+the tag format, the manifest format, and the verification step are
+identical no matter which of the three is in effect; there is no separate
+bench-only code path to keep in sync with the real one.
+
+**The environment variable does not reach a fresh install.** FPP's Plugin
+Manager runs a fresh install's `fpp_install.sh` under plain `sudo`, not
+`sudo -E`, so `sudo` builds a new environment containing only the two
+values FPP passes explicitly and discards everything else, including
+`SHOWMESH_PLUGIN_ARTIFACT_BASE_URL` however it was set (shell export,
+container environment, `/etc/environment`). An upgrade is different:
+`plugin.php`'s upgrade path exports `FPPDIR` and calls `sudo -E`, which
+does preserve the environment, so the variable still works there. See
+"How `FPPDIR` actually arrives" below for the source read this rests on.
+
+For a fresh install, use the override file instead:
+`$(sm_state_dir)/artifact-base-url`, which on a stock host is
+`/home/fpp/media/plugindata/fpp-showmesh/artifact-base-url`. Write the
+target base URL as its only content, as root, before installing the
+plugin through FPP's Plugin Manager. That directory is not the plugin
+directory (which the Plugin Manager only creates during install, too late
+for an operator to stage anything in it); it is the plugin's own state
+directory under FPP's media tree, which an operator can create ahead of
+time with plain `mkdir -p` and `ssh` access, and which the installer's own
+scaffold step also creates before it reads this file if it is not already
+there. The file is trimmed of all whitespace before use; empty or
+whitespace-only content is treated the same as the file being absent.
 
 **Pointing this at a bench host is not, by itself, enough to make a bench
 install pass.** `artifacts.lock.json` as committed to this repository
@@ -359,6 +382,10 @@ FPP's tree entirely.
   of the scaffold created them at `0644`, disagreeing with the binary from
   the moment install finished; picked one mode rather than leaving that
   standing.)
+- `<statedir>/artifact-base-url`: not scaffolded by the installer, and
+  present only if an operator wrote it there themselves before a fresh
+  install; see "The bench override" above. Read, never created or
+  overwritten, by `sm_artifact_base_url`.
 - The binary itself, installed to the plugin directory at mode `0755`.
 - `.installed-arch`, alongside the binary in the plugin directory —
   records which architecture was actually fetched, so `preStart.sh` can
