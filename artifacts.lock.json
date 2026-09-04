@@ -1,10 +1,11 @@
 {
-  "note": "Real digests for version 0.1.2, taken from the plugin repository's release-manifest.json for source commit e9b511a61007. Those artifacts are a private candidate build, not a published release, so the default artifact host still serves nothing for this version; the digests are what a bench or a later publication of that same build must match. Regenerate this file from the manifest whenever a new release is cut; there is no tooling that does it automatically.",
-  "version": "0.1.2",
+  "note": "Real digests for version 0.1.3, built from the plugin repository's main branch at commit 39d3f025f7d0df5828faf5b38f6731dc9d2cbe61 (make release-with-prebuilt-fpp10 VERSION=0.1.3), the first commit where the native-prebuilt-fpp10 build path exists. Those artifacts are a private candidate build, not a published release, so the default artifact host still serves nothing for this version; the digests are what a bench or a later publication of that same build must match. Regenerate this file from the manifest whenever a new release is cut; there is no tooling that does it automatically. The native-prebuilt-fpp10 kind carries an arm64 entry only: amd64 and armv7 need a QEMU-emulated container build this session's Docker Desktop VM ran out of disk space to complete, and were not added rather than filled in with placeholder digests. An amd64 or armv7 FPP 10 host has no lock entry to match yet and falls back to compiling, which sm_install_native treats as a normal, safe outcome.",
+  "version": "0.1.3",
   "artifacts": [
-    { "filename": "showmesh-fpp-plugin_0.1.2_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "6fefde8d00bf4b98aa49836cad5c1853f5e4536b0d3902efed99b25315bd5989" },
-    { "filename": "showmesh-fpp-plugin_0.1.2_linux_arm64.tar.gz", "kind": "go-helper", "architecture": "arm64", "sha256": "75e9c1ae544906371a3fdd7473f7f126c29ac5110be0bd8609cbcae59e8ed1b2" },
-    { "filename": "showmesh-fpp-plugin_0.1.2_linux_armv7.tar.gz", "kind": "go-helper", "architecture": "armv7", "sha256": "087b170a8dd1cf70127d8bfd2d4ad934b8e93b18e6f306f98f6850cfacccc593" },
-    { "filename": "showmesh-fpp-plugin-native_0.1.2.tar.gz", "kind": "native-source", "architecture": "any", "sha256": "39b8c8e5afeebf828d1aa40a5041a3842f36a662749a78e4e1985a5257240926" }
+    { "filename": "showmesh-fpp-plugin_0.1.3_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "e878ab8878f3fd6c33dea9dd8db4b2ed4c6ffa6b783d62d1ec93325bce89de44" },
+    { "filename": "showmesh-fpp-plugin_0.1.3_linux_arm64.tar.gz", "kind": "go-helper", "architecture": "arm64", "sha256": "c8b6da9bc1a3f51d120b334e3267518c7c0626226087d6a1989fbce0f6dc3c9c" },
+    { "filename": "showmesh-fpp-plugin_0.1.3_linux_armv7.tar.gz", "kind": "go-helper", "architecture": "armv7", "sha256": "fe35029d2981fd584227d9b66e54c2bef9e1a19beb9a1106ccffddd5cc1fe8fb" },
+    { "filename": "showmesh-fpp-plugin-native_0.1.3.tar.gz", "kind": "native-source", "architecture": "any", "sha256": "a07db8f994377570044f051988806f2fdafae4bbcebdd6a625dcde2d3b8c6376" },
+    { "filename": "libshowmesh-fpp10-arm64.so", "kind": "native-prebuilt-fpp10", "architecture": "arm64", "sha256": "decbc3d439404cdf5cfed14e5028b1050b950963133ef9bbd25ad85badc22b87" }
   ]
 }

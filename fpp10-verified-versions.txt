@@ -1,0 +1,16 @@
+# FPP 10 point releases verified to share the (FPP_PLUGIN_API_VERSION, four
+# ABI probe values) plugin-load fingerprint that the shipped
+# libshowmesh-fpp10-<arch>.so prebuilt objects were built and tested
+# against. Mirrors the plugin repository's native/adapters/FPP-PINS.md,
+# which records the same fact for the compile path; this file exists
+# because that one lives in a different repository and is not readable by
+# the installer on a player at install time.
+#
+# One full x.y.z version per line, matched by exact string equality
+# against getFPPVersionTriplet() from the host's own fppversion.php. Add a
+# line only once that release has actually been re-verified against the
+# fingerprint the same way FPP-PINS.md's own rule requires for compiling,
+# never on the assumption that a point release "should" match. Any host
+# whose version is not listed here falls back to compiling, which is
+# always safe.
+10.0.0

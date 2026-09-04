@@ -89,6 +89,220 @@ sm_fpp_major() {
     printf '%s\n' "$_sm_major"
 }
 
+# Reads the host's full FPP version (x.y.z) out of the same generated
+# helper sm_fpp_major reads, via getFPPVersionTriplet(). Confirmed present
+# at the pinned FPP 10.0 commit (370e62ed7e8c8318da6ee5b01312b8b75082d952)
+# and at FPP 9.5.3; both return the full dotted version as a plain quoted
+# string, unlike getFPPPatchVersion() on FPP 10.0, which is empty even on
+# a non-zero-patch-shaped tag. This is the value matched against
+# fpp10-verified-versions.txt to decide prebuilt-object eligibility: the
+# major alone is not enough to know whether the running host shares the
+# fingerprint a prebuilt object was built against.
+#
+# Only digits and dots are accepted in the captured value; anything else
+# fails the pattern and returns empty, which the caller reads as
+# unreadable and falls back to compiling rather than guessing.
+sm_fpp_full_version() {
+    local _sm_fppdir _sm_version_php _sm_full _sm_sed
+    _sm_fppdir="$1"
+    _sm_version_php="$_sm_fppdir/www/fppversion.php"
+
+    if [ ! -f "$_sm_version_php" ]; then
+        sm_log_err "FPP's generated version helper is missing at $_sm_version_php; cannot determine this host's full FPP version"
+        return 1
+    fi
+
+    _sm_sed=$(sm_resolve_bin sed /bin/sed /usr/bin/sed) || return 1
+
+    _sm_full=$("$_sm_sed" -n \
+        '/function[[:space:]]*getFPPVersionTriplet[[:space:]]*(/,/}/ { s/.*return[[:space:]]*"\([0-9][0-9.]*\)"[[:space:]]*;.*/\1/p ; }' \
+        "$_sm_version_php")
+    _sm_full=${_sm_full%%
+*}
+
+    if [ -z "$_sm_full" ]; then
+        sm_log_err "could not read a full FPP version out of $_sm_version_php; refusing to guess whether this host's fingerprint is verified"
+        return 1
+    fi
+
+    printf '%s\n' "$_sm_full"
+}
+
+# Path of the record of FPP 10 point releases verified to share the
+# fingerprint the shipped prebuilt objects were built against. Ships in
+# this repository, next to artifacts.lock.json, rather than in the plugin
+# repository's native/adapters/FPP-PINS.md: that file lives in a
+# different repository and cannot be read by this installer on a host at
+# install time.
+sm_fpp10_verified_versions_path() {
+    printf '%s\n' "$1/fpp10-verified-versions.txt"
+}
+
+# True if $2 (a full x.y.z FPP version) appears as its own line in the
+# verified-versions file at $1/fpp10-verified-versions.txt, ignoring
+# comment and blank lines. Matched by exact whole-line equality, not by
+# substring or prefix, so "10.0.0" never matches a line reading "10.0.10".
+# A missing file, like a missing lock entry, is refused rather than
+# treated as an empty and therefore always-failing set: silently absent
+# would be indistinguishable from "verified nothing" to anyone reading the
+# log, and this way the log says which is true.
+sm_fpp10_version_verified() {
+    local _sm_plugin_dir _sm_full_version _sm_file _sm_grep
+    _sm_plugin_dir="$1"
+    _sm_full_version="$2"
+    _sm_file=$(sm_fpp10_verified_versions_path "$_sm_plugin_dir")
+    _sm_grep=$(sm_resolve_bin grep /usr/bin/grep /bin/grep) || return 1
+
+    if [ ! -f "$_sm_file" ]; then
+        sm_log_err "no FPP 10 verified-versions record at $_sm_file; refusing to trust a prebuilt object without one"
+        return 1
+    fi
+
+    "$_sm_grep" -Fxq "$_sm_full_version" "$_sm_file"
+}
+
+# Filename of the prebuilt FPP 10 adapter object for architecture $1,
+# matching the plugin repository's release-manifest naming
+# (native-prebuilt-fpp10 artifact kind). Carries no version: see
+# sm_native_prebuilt_marker_path below for how an installed object stays
+# traceable to a release without one.
+sm_native_prebuilt_object_name() {
+    printf 'libshowmesh-fpp10-%s.so\n' "$1"
+}
+
+# Path of the marker recording which release version and digest of the
+# prebuilt FPP 10 object is currently installed at $1's native object
+# path. The object's own filename carries no version (see
+# sm_native_prebuilt_object_name), so without this marker an operator
+# reading the host has no way to tell which release's bytes are live.
+# Written via sm_write_stamp, the same discipline sm_native_record_failure
+# uses, so a failed write cannot truncate an already-recorded marker.
+sm_native_prebuilt_marker_path() {
+    printf '%s\n' "$1/.installed-native-prebuilt"
+}
+
+# Writes the prebuilt marker: the FPP version the object was fetched for,
+# a space, and the sha256 that was verified against artifacts.lock.json
+# before it was activated.
+sm_native_write_prebuilt_marker() {
+    local _sm_plugin_dir _sm_full_version _sm_sha256 _sm_marker
+    _sm_plugin_dir="$1"
+    _sm_full_version="$2"
+    _sm_sha256="$3"
+    _sm_marker=$(sm_native_prebuilt_marker_path "$_sm_plugin_dir")
+
+    if ! sm_write_stamp "$_sm_marker" "$_sm_full_version $_sm_sha256"; then
+        sm_log_err "could not record the prebuilt-object marker at $_sm_marker; the prebuilt object IS installed and verified despite this"
+    fi
+}
+
+# Removes the prebuilt marker once the resident component is installed by
+# some OTHER path (on-host compile), so a marker left by an earlier
+# prebuilt install does not go on describing an object that is no longer
+# what is actually live. Mirrors sm_native_clear_failure_marker: reported
+# but not fatal if removal itself fails, since the object already in
+# place is what matters, not this file's accuracy.
+sm_native_clear_prebuilt_marker() {
+    local _sm_marker _sm_rm
+    _sm_marker=$(sm_native_prebuilt_marker_path "$1")
+    [ -e "$_sm_marker" ] || return 0
+    _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 0
+    "$_sm_rm" -f "$_sm_marker" || sm_log_err "could not remove the stale prebuilt marker at $_sm_marker; the resident component was installed by compiling, not from the prebuilt object that marker names"
+    return 0
+}
+
+# Attempts to fetch, verify, stage, and activate the prebuilt FPP 10
+# adapter object for this host's architecture. Returns non-zero on ANY
+# failure (architecture detection, a missing lock entry, a download
+# failure, a digest mismatch, staging, or activation), and every failure
+# path leaves whatever was previously installed untouched, exactly like
+# sm_install_native's own compile path. The caller (sm_install_native)
+# reads a non-zero return as "fall back to compiling," never as a reason
+# to fail the whole install.
+#
+# DIGEST ONLY: the object is trusted purely by the sha256 committed in
+# artifacts.lock.json, resolved before any network access exactly as
+# sm_install_binary and the compile path above already do. Nothing here
+# reads the object's <object>.build.json sidecar; that file is not
+# digest-pinned by this repository's lock and is not a trust or selection
+# input for this or any other reason.
+sm_install_native_prebuilt() {
+    local _sm_plugin_dir _sm_fppdir _sm_version _sm_full_version
+    local _sm_arch _sm_object_name _sm_base_url _sm_expected_hash
+    local _sm_mktemp _sm_rm _sm_workdir _sm_object _sm_staging
+    _sm_plugin_dir="$1"
+    _sm_fppdir="$2"
+    _sm_version="$3"
+    _sm_full_version="$4"
+
+    _sm_arch=$(sm_detect_arch "$_sm_fppdir") || {
+        sm_log_err "architecture detection failed; cannot select a prebuilt object, falling back to compiling"
+        return 1
+    }
+    _sm_object_name=$(sm_native_prebuilt_object_name "$_sm_arch")
+
+    _sm_base_url=$(sm_artifact_base_url "$_sm_version")
+    sm_check_base_url_scheme "$_sm_base_url" || return 1
+
+    # Resolved before any network access, exactly as sm_install_binary and
+    # the compile path above do: a missing lock entry refuses the
+    # prebuilt attempt outright rather than fetching bytes there is
+    # nothing trustworthy to check against.
+    _sm_expected_hash=$(sm_lock_expected_sha256 "$_sm_plugin_dir" "$_sm_version" "$_sm_object_name") || {
+        sm_log_err "no artifacts.lock.json entry for $_sm_object_name; falling back to compiling the resident component"
+        return 1
+    }
+
+    _sm_mktemp=$(sm_resolve_bin mktemp /bin/mktemp /usr/bin/mktemp) || return 1
+    _sm_rm=$(sm_resolve_bin rm /bin/rm /usr/bin/rm) || return 1
+    _sm_workdir=$("$_sm_mktemp" -d /tmp/fpp-showmesh-native-prebuilt.XXXXXX) || {
+        sm_log_err "could not create a temporary working directory for the prebuilt object"
+        return 1
+    }
+
+    sm_log "fetching prebuilt $_sm_object_name from $_sm_base_url (FPP $_sm_full_version is in the verified set)"
+    if ! sm_download "$_sm_base_url/$_sm_object_name" "$_sm_workdir/$_sm_object_name"; then
+        "$_sm_rm" -rf "$_sm_workdir"
+        return 1
+    fi
+
+    if ! sm_verify_sha256 "$_sm_workdir/$_sm_object_name" "$_sm_expected_hash"; then
+        sm_log_err "refusing to activate a prebuilt object that failed checksum verification against artifacts.lock.json; falling back to compiling the resident component"
+        "$_sm_rm" -rf "$_sm_workdir"
+        return 1
+    fi
+
+    _sm_object=$(sm_native_object_path "$_sm_plugin_dir")
+    _sm_staging="$_sm_object.staging"
+
+    if ! sm_stage_binary "$_sm_workdir/$_sm_object_name" "$_sm_staging"; then
+        "$_sm_rm" -rf "$_sm_workdir"
+        return 1
+    fi
+    "$_sm_rm" -rf "$_sm_workdir"
+
+    if ! sm_activate_binary "$_sm_staging" "$_sm_object"; then
+        return 1
+    fi
+
+    # Same transaction boundary as sm_install_native's compile path: a
+    # failed mode readback rolls back to whatever was live before this
+    # attempt, rather than leaving an unverified object live with no way
+    # back.
+    if ! sm_verify_mode "$_sm_object" 755; then
+        sm_activate_undo "$_sm_object"
+        return 1
+    fi
+
+    sm_activate_commit "$_sm_object"
+    sm_native_write_prebuilt_marker "$_sm_plugin_dir" "$_sm_full_version" "$_sm_expected_hash"
+    sm_native_clear_failure_marker
+
+    sm_log "installed the prebuilt resident component ($_sm_object_name, FPP $_sm_full_version, $_sm_arch) to $_sm_object without compiling"
+    sm_log "fppd keeps the previously loaded object mapped until it is reloaded; the operator decides when that happens"
+    return 0
+}
+
 # Maps an FPP major to the adapter make target and the object that target
 # produces. Prints "<target> <soname>".
 #
@@ -191,7 +405,7 @@ sm_install_native() {
     local _sm_plugin_dir _sm_fppdir _sm_version _sm_major _sm_adapter
     local _sm_target _sm_soname _sm_tarball _sm_base_url _sm_expected_hash
     local _sm_mktemp _sm_rm _sm_workdir _sm_tar _sm_built _sm_object
-    local _sm_staging _sm_buildlog
+    local _sm_staging _sm_buildlog _sm_full_version
     _sm_plugin_dir="$1"
     _sm_fppdir="$2"
     _sm_version="$3"
@@ -206,7 +420,28 @@ sm_install_native() {
     }
     _sm_target=${_sm_adapter%% *}
     _sm_soname=${_sm_adapter##* }
-    sm_log "detected FPP major version $_sm_major; building adapter $_sm_target"
+    sm_log "detected FPP major version $_sm_major"
+
+    # FPP 10 only: a host whose full version is in fpp10-verified-versions.txt
+    # gets a digest-verified prebuilt object instead of a source compile,
+    # per the ruling this repository ships with. Any failure along this
+    # path (an unreadable version, a version outside the verified set, a
+    # missing lock entry, a download failure, a digest mismatch) falls
+    # through to the unchanged compile path below rather than failing the
+    # install; falling back to compiling is always safe.
+    if [ "$_sm_major" = 10 ]; then
+        _sm_full_version=$(sm_fpp_full_version "$_sm_fppdir")
+        if [ -n "$_sm_full_version" ] && sm_fpp10_version_verified "$_sm_plugin_dir" "$_sm_full_version"; then
+            if sm_install_native_prebuilt "$_sm_plugin_dir" "$_sm_fppdir" "$_sm_version" "$_sm_full_version"; then
+                return 0
+            fi
+            sm_log "prebuilt install did not complete; falling back to compiling adapter $_sm_target"
+        else
+            sm_log "FPP $_sm_full_version is not in the verified set (or could not be read); compiling adapter $_sm_target"
+        fi
+    fi
+
+    sm_log "building adapter $_sm_target"
 
     _sm_tarball="showmesh-fpp-plugin-native_${_sm_version}.tar.gz"
     _sm_base_url=$(sm_artifact_base_url "$_sm_version")
@@ -316,6 +551,10 @@ sm_install_native() {
 
     sm_activate_commit "$_sm_object"
     sm_native_clear_failure_marker
+    # The object just activated came from compiling, not from a prior
+    # prebuilt install; a marker left describing an earlier prebuilt
+    # object would now name bytes that are no longer what is live.
+    sm_native_clear_prebuilt_marker "$_sm_plugin_dir"
 
     # fppd holds the previous object mapped until it restarts or the plugin is
     # unloaded and reloaded, so the file being in place is not the same as the

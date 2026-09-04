@@ -2291,6 +2291,298 @@ assert_eq "no binary is installed when the config scaffold step failed" "" "$( [
 unset -f sm_detect_arch sm_download
 
 # ---------------------------------------------------------------------------
+# native.sh: the FPP 10 prebuilt install path
+# ---------------------------------------------------------------------------
+#
+# sm_install_native gains a digest-verified prebuilt shortcut for FPP 10
+# hosts whose full version is in fpp10-verified-versions.txt; every other
+# host (FPP 9, an unlisted FPP 10 version, or any failure along the
+# prebuilt path) must fall back to the existing sm_native_compile path
+# unchanged. sm_native_compile is shadowed throughout this section, not
+# left real: a real compile needs a real FPP source tree this suite does
+# not have, and a shadow that unconditionally fails is also the strongest
+# available proof that the prebuilt path never reaches it: if it were
+# called, the whole install would fail, which the "prebuilt install
+# succeeds" assertions below would catch.
+# ---------------------------------------------------------------------------
+
+echo "== native.sh: FPP 10 prebuilt install path =="
+
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/native.sh"
+
+# Never reads the sidecar this repository deliberately keeps
+# undigest-pinned: enforced by static grep rather than only by behavior,
+# so a future edit that starts consulting build.json for any trust or
+# selection decision fails this suite immediately, in the file it changed.
+# Comment lines are stripped first: this file's own header prose names
+# the sidecar to explain why it is never read, which must not itself trip
+# the guard it is describing.
+if grep -v '^[[:space:]]*#' "$_sm_lib_dir/native.sh" | grep -q 'build\.json'; then
+    fail "native.sh never reads an <object>.build.json sidecar" "found a build.json reference outside a comment in native.sh"
+else
+    pass "native.sh never reads an <object>.build.json sidecar"
+fi
+
+make_fppversion_php() {
+    # $1 = destination path, $2 = major, $3 = full x.y.z version, or empty
+    # to omit getFPPVersionTriplet entirely (the FPP-major-only fixture).
+    mkdir -p "$(dirname "$1")"
+    {
+        printf '<?\n'
+        printf 'function getFPPMajorVersion() {\n\treturn "%s";\n}\n' "$2"
+        if [ -n "$3" ]; then
+            printf 'function getFPPVersionTriplet() {\n    return "%s";\n}\n' "$3"
+        fi
+    } > "$1"
+}
+
+_sm_natdir="$_sm_tmp/native-prebuilt"
+mkdir -p "$_sm_natdir"
+sm_state_dir() { printf '%s\n' "$_sm_natdir/state"; }
+
+# --- sm_fpp_full_version reads getFPPVersionTriplet, same file sm_fpp_major
+# reads, and refuses (empty, non-zero) rather than guessing when the
+# function is absent. ---
+_sm_fv_fppdir="$_sm_natdir/fppdir-triplet"
+make_fppversion_php "$_sm_fv_fppdir/www/fppversion.php" 10 "10.0.0"
+assert_eq "sm_fpp_full_version reads getFPPVersionTriplet's value" "10.0.0" "$(sm_fpp_full_version "$_sm_fv_fppdir")"
+
+_sm_fv_notriplet="$_sm_natdir/fppdir-no-triplet"
+make_fppversion_php "$_sm_fv_notriplet/www/fppversion.php" 10 ""
+out=$(sm_fpp_full_version "$_sm_fv_notriplet" 2>&1)
+status=$?
+assert_failure "sm_fpp_full_version refuses when getFPPVersionTriplet is absent" "$status"
+assert_eq "sm_fpp_full_version prints nothing on stdout when it refuses" "" "$(sm_fpp_full_version "$_sm_fv_notriplet" 2>/dev/null)"
+
+# --- sm_fpp10_version_verified: exact whole-line match, not prefix, and a
+# missing file refuses rather than reading as an empty (always-false) set. ---
+_sm_vv_plugindir="$_sm_natdir/verified-set"
+mkdir -p "$_sm_vv_plugindir"
+cat > "$_sm_vv_plugindir/fpp10-verified-versions.txt" <<'TXT'
+# comment line, must be ignored
+10.0.0
+
+10.0.2
+TXT
+if sm_fpp10_version_verified "$_sm_vv_plugindir" "10.0.0"; then
+    pass "sm_fpp10_version_verified matches a listed version"
+else
+    fail "sm_fpp10_version_verified matches a listed version" "unexpected refusal"
+fi
+if sm_fpp10_version_verified "$_sm_vv_plugindir" "10.0.20"; then
+    fail "sm_fpp10_version_verified does not prefix-match 10.0.2 against 10.0.20" "matched when it must not"
+else
+    pass "sm_fpp10_version_verified does not prefix-match 10.0.2 against 10.0.20"
+fi
+if sm_fpp10_version_verified "$_sm_vv_plugindir" "10.0.1"; then
+    fail "sm_fpp10_version_verified refuses an unlisted version" "matched when it must not"
+else
+    pass "sm_fpp10_version_verified refuses an unlisted version"
+fi
+
+_sm_vv_missing="$_sm_natdir/no-verified-file"
+mkdir -p "$_sm_vv_missing"
+out=$(sm_fpp10_version_verified "$_sm_vv_missing" "10.0.0" 2>&1)
+status=$?
+assert_failure "sm_fpp10_version_verified refuses when the record file is missing" "$status"
+assert_contains "the refusal names the missing path" "$out" "fpp10-verified-versions.txt"
+
+# --- sm_install_native, end to end: shared fixtures ---
+
+_sm_ni_version="0.1.9"
+_sm_ni_arch=arm64
+sm_detect_arch() { echo "$_sm_ni_arch"; }
+
+# sm_install_native itself is always called through $(...) below to
+# capture its log output, and $(...) runs in a subshell: a plain variable
+# this stub set would vanish with that subshell and read back as its
+# original value in the parent shell regardless of whether the stub ran.
+# A marker FILE survives the subshell exit exactly because it is a
+# filesystem side effect, not shell state, so that is what "was
+# sm_native_compile called" is checked against below, never a variable.
+_sm_ni_compile_marker="$_sm_tmp/native-compile-called"
+sm_native_compile() {
+    # $1 = bundle dir, $2 = logfile, $3 = target, $4 = fpp src.
+    # Fabricates the built object sm_install_native expects afterward, so
+    # the fallback path this stub feeds can still reach staging and
+    # activation and prove ITS OWN success independent of a real compiler.
+    : > "$_sm_ni_compile_marker"
+    mkdir -p "$1/native/adapters/build/$3"
+    printf 'compiled adapter bytes' > "$1/native/adapters/build/$3/lib${SM_TEST_SONAME:-showmesh-fpp10.so}"
+    return 0
+}
+
+make_native_source_tarball() {
+    # $1 = output path. Contents are irrelevant beyond existing: the
+    # sm_native_compile stub above ignores them entirely.
+    _sm_mnt_dir=$(mktemp -d)
+    mkdir -p "$_sm_mnt_dir/native/adapters"
+    printf 'placeholder\n' > "$_sm_mnt_dir/native/adapters/Makefile"
+    (cd "$_sm_mnt_dir" && tar -czf "$1" native)
+    rm -rf "$_sm_mnt_dir"
+}
+
+make_native_lock() {
+    # $1 = lock path, $2 = version, $3 = native-source filename, $4 = its
+    # sha256, $5 = prebuilt object filename (or empty to omit), $6 = its
+    # sha256.
+    {
+        printf '{\n  "version": "%s",\n  "artifacts": [\n' "$2"
+        printf '    { "filename": "%s", "kind": "native-source", "architecture": "any", "sha256": "%s" }' "$3" "$4"
+        if [ -n "$5" ]; then
+            printf ',\n    { "filename": "%s", "kind": "native-prebuilt-fpp10", "architecture": "arm64", "sha256": "%s" }' "$5" "$6"
+        fi
+        printf '\n  ]\n}\n'
+    } > "$1"
+}
+
+make_native_source_tarball "$_sm_tmp/native-source.tar.gz"
+_sm_ni_src_hash=$(sha256sum "$_sm_tmp/native-source.tar.gz" | awk '{print $1}')
+_sm_ni_src_name="showmesh-fpp-plugin-native_${_sm_ni_version}.tar.gz"
+
+printf 'a real prebuilt object'"'"'s bytes' > "$_sm_tmp/prebuilt-good.so"
+_sm_ni_prebuilt_hash=$(sha256sum "$_sm_tmp/prebuilt-good.so" | awk '{print $1}')
+_sm_ni_prebuilt_name="libshowmesh-fpp10-${_sm_ni_arch}.so"
+
+# --- scenario A: FPP 10, version in the verified set, digest matches:
+# the prebuilt object is installed and sm_native_compile is never called. ---
+_sm_ni_a="$_sm_ipdir/native-prebuilt-match"
+mkdir -p "$_sm_ni_a"
+make_fppversion_php "$_sm_ni_a/fppdir/www/fppversion.php" 10 "10.0.0"
+mkdir -p "$_sm_ni_a/verified-set"
+printf '10.0.0\n' > "$_sm_ni_a/fpp10-verified-versions.txt"
+make_native_lock "$_sm_ni_a/artifacts.lock.json" "$_sm_ni_version" "$_sm_ni_src_name" "$_sm_ni_src_hash" "$_sm_ni_prebuilt_name" "$_sm_ni_prebuilt_hash"
+sm_download() { sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/prebuilt-good.so" "$_sm_ni_prebuilt_name"; }
+rm -f "$_sm_ni_compile_marker"
+
+out=$(sm_install_native "$_sm_ni_a" "$_sm_ni_a/fppdir" "$_sm_ni_version" 2>&1)
+status=$?
+assert_success "a verified-set FPP 10 host installs the prebuilt object" "$status"
+assert_eq "sm_native_compile is never called for a verified-set match" "" "$( [ -e "$_sm_ni_compile_marker" ] && echo called )"
+assert_contains "the install log says it installed without compiling" "$out" "without compiling"
+assert_eq "the activated object holds the prebuilt object's bytes" "a real prebuilt object's bytes" "$(cat "$_sm_ni_a/libfpp-showmesh.so")"
+assert_eq "the prebuilt marker records the version and digest" "10.0.0 $_sm_ni_prebuilt_hash" "$(cat "$_sm_ni_a/.installed-native-prebuilt")"
+assert_eq "no native-install-failed marker is left after a prebuilt success" "" "$( [ -e "$_sm_natdir/state/native-install-failed.txt" ] && echo present )"
+
+# --- scenario B: FPP 10, version NOT in the verified set, falls back to
+# compiling, and the object staged comes from the compile stub, not from
+# any prebuilt fetch (sm_download is never invoked with the object's URL;
+# left shadowed to fail loudly if it is, to make the absence observable
+# rather than merely asserted). ---
+_sm_ni_b="$_sm_ipdir/native-prebuilt-unlisted"
+mkdir -p "$_sm_ni_b"
+make_fppversion_php "$_sm_ni_b/fppdir/www/fppversion.php" 10 "10.0.1"
+printf '10.0.0\n' > "$_sm_ni_b/fpp10-verified-versions.txt"
+make_native_lock "$_sm_ni_b/artifacts.lock.json" "$_sm_ni_version" "$_sm_ni_src_name" "$_sm_ni_src_hash" "$_sm_ni_prebuilt_name" "$_sm_ni_prebuilt_hash"
+SM_TEST_SONAME=showmesh-fpp10.so
+sm_download() {
+    case "$1" in
+        */"$_sm_ni_prebuilt_name")
+            sm_log_err "test failure: sm_download was asked for the prebuilt object on an unlisted-version host"
+            return 1
+            ;;
+    esac
+    sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/native-source.tar.gz" "$_sm_ni_src_name"
+}
+rm -f "$_sm_ni_compile_marker"
+
+out=$(sm_install_native "$_sm_ni_b" "$_sm_ni_b/fppdir" "$_sm_ni_version" 2>&1)
+status=$?
+assert_success "an unlisted FPP 10 version still ends with a working compiled component" "$status"
+assert_eq "sm_native_compile IS called for an unlisted version" "called" "$( [ -e "$_sm_ni_compile_marker" ] && echo called )"
+assert_eq "the activated object holds the compiled stub's bytes, not the prebuilt fixture's" "compiled adapter bytes" "$(cat "$_sm_ni_b/libfpp-showmesh.so")"
+assert_eq "no prebuilt marker is written when the install came from compiling" "" "$( [ -e "$_sm_ni_b/.installed-native-prebuilt" ] && echo present )"
+
+# --- scenario C: FPP 10, version verified, but the served bytes do not
+# match the locked digest, refused, and still falls back to compiling
+# rather than failing the install outright. ---
+_sm_ni_c="$_sm_ipdir/native-prebuilt-digest-mismatch"
+mkdir -p "$_sm_ni_c"
+make_fppversion_php "$_sm_ni_c/fppdir/www/fppversion.php" 10 "10.0.0"
+printf '10.0.0\n' > "$_sm_ni_c/fpp10-verified-versions.txt"
+make_native_lock "$_sm_ni_c/artifacts.lock.json" "$_sm_ni_version" "$_sm_ni_src_name" "$_sm_ni_src_hash" "$_sm_ni_prebuilt_name" "$_sm_ni_prebuilt_hash"
+printf 'tampered prebuilt bytes, does not match the lock' > "$_sm_tmp/prebuilt-tampered.so"
+sm_download() {
+    case "$1" in
+        */"$_sm_ni_prebuilt_name") cp "$_sm_tmp/prebuilt-tampered.so" "$2" ;;
+        *) sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/native-source.tar.gz" "$_sm_ni_src_name" ;;
+    esac
+}
+rm -f "$_sm_ni_compile_marker"
+
+out=$(sm_install_native "$_sm_ni_c" "$_sm_ni_c/fppdir" "$_sm_ni_version" 2>&1)
+status=$?
+assert_success "a digest mismatch on the prebuilt object still ends with a working compiled component" "$status"
+assert_contains "the refusal names checksum verification" "$out" "checksum verification"
+assert_eq "sm_native_compile IS called after a digest mismatch" "called" "$( [ -e "$_sm_ni_compile_marker" ] && echo called )"
+assert_eq "the activated object holds the compiled stub's bytes, not the tampered ones" "compiled adapter bytes" "$(cat "$_sm_ni_c/libfpp-showmesh.so")"
+
+# --- scenario D: FPP 10, version verified, but artifacts.lock.json has no
+# entry for this architecture's prebuilt object, refused rather than
+# silently proceeding, and still falls back to compiling. ---
+_sm_ni_d="$_sm_ipdir/native-prebuilt-no-lock-entry"
+mkdir -p "$_sm_ni_d"
+make_fppversion_php "$_sm_ni_d/fppdir/www/fppversion.php" 10 "10.0.0"
+printf '10.0.0\n' > "$_sm_ni_d/fpp10-verified-versions.txt"
+make_native_lock "$_sm_ni_d/artifacts.lock.json" "$_sm_ni_version" "$_sm_ni_src_name" "$_sm_ni_src_hash" "" ""
+sm_download() { sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/native-source.tar.gz" "$_sm_ni_src_name"; }
+rm -f "$_sm_ni_compile_marker"
+
+out=$(sm_install_native "$_sm_ni_d" "$_sm_ni_d/fppdir" "$_sm_ni_version" 2>&1)
+status=$?
+assert_success "a missing lock entry for the prebuilt object still ends with a working compiled component" "$status"
+assert_contains "the refusal names the missing lock entry" "$out" "no artifacts.lock.json entry"
+assert_eq "sm_native_compile IS called when there is no lock entry" "called" "$( [ -e "$_sm_ni_compile_marker" ] && echo called )"
+
+# --- scenario E: FPP 9 is unaffected: no version check, no prebuilt
+# fetch attempt, straight to compiling, exactly as before this feature. ---
+_sm_ni_e="$_sm_ipdir/native-fpp9-unaffected"
+mkdir -p "$_sm_ni_e"
+make_fppversion_php "$_sm_ni_e/fppdir/www/fppversion.php" 9 ""
+make_native_lock "$_sm_ni_e/artifacts.lock.json" "$_sm_ni_version" "$_sm_ni_src_name" "$_sm_ni_src_hash" "" ""
+sm_download() {
+    case "$1" in
+        */"$_sm_ni_prebuilt_name")
+            sm_log_err "test failure: sm_download was asked for a prebuilt FPP 10 object on an FPP 9 host"
+            return 1
+            ;;
+    esac
+    sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/native-source.tar.gz" "$_sm_ni_src_name"
+}
+SM_TEST_SONAME=showmesh-fpp9.so
+rm -f "$_sm_ni_compile_marker"
+
+out=$(sm_install_native "$_sm_ni_e" "$_sm_ni_e/fppdir" "$_sm_ni_version" 2>&1)
+status=$?
+assert_success "an FPP 9 host still ends with a working compiled component" "$status"
+assert_eq "sm_native_compile IS called for FPP 9, exactly as before this feature" "called" "$( [ -e "$_sm_ni_compile_marker" ] && echo called )"
+assert_eq "no prebuilt marker exists for an FPP 9 install" "" "$( [ -e "$_sm_ni_e/.installed-native-prebuilt" ] && echo present )"
+unset SM_TEST_SONAME
+
+# --- scenario F: a host that previously had the prebuilt object installed
+# later falls back to compiling (e.g. after the verified-set record is
+# tightened): the stale prebuilt marker must not be left describing bytes
+# that are no longer what is live. ---
+_sm_ni_f="$_sm_ipdir/native-prebuilt-then-compile"
+mkdir -p "$_sm_ni_f"
+printf 'prior version marker, must be removed' > "$_sm_ni_f/.installed-native-prebuilt"
+make_fppversion_php "$_sm_ni_f/fppdir/www/fppversion.php" 10 "9.9.9"
+printf '10.0.0\n' > "$_sm_ni_f/fpp10-verified-versions.txt"
+make_native_lock "$_sm_ni_f/artifacts.lock.json" "$_sm_ni_version" "$_sm_ni_src_name" "$_sm_ni_src_hash" "" ""
+SM_TEST_SONAME=showmesh-fpp10.so
+sm_download() { sm_download_serve_tarball_and_sums "$1" "$2" "$_sm_tmp/native-source.tar.gz" "$_sm_ni_src_name"; }
+rm -f "$_sm_ni_compile_marker"
+
+sm_install_native "$_sm_ni_f" "$_sm_ni_f/fppdir" "$_sm_ni_version" >/dev/null 2>&1
+assert_eq "a stale prebuilt marker is removed once a compile installs a fresh object" "" "$( [ -e "$_sm_ni_f/.installed-native-prebuilt" ] && echo present )"
+unset SM_TEST_SONAME
+
+unset -f sm_detect_arch sm_download sm_native_compile sm_state_dir
+rm -f "$_sm_ni_compile_marker"
+unset _sm_ni_compile_marker _sm_ni_version _sm_ni_arch
+
+# ---------------------------------------------------------------------------
 # Repository hygiene: the executable bits everything else depends on
 # ---------------------------------------------------------------------------
 #
