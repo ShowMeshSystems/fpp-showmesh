@@ -185,6 +185,83 @@ assert_contains "rendered page names the backup as the source in use" "$_sm_rend
 rm -f "$_sm_fixture_dir/brightness-state" "$_sm_fixture_dir/brightness-state.bak"
 
 # ---------------------------------------------------------------------------
+# Integration: pairing state rendering, from fixture pairing-status.json /
+# pairing-code files, end to end through the real plugin.php.
+# ---------------------------------------------------------------------------
+
+rm -f "$_sm_fixture_dir/pairing-status.json" "$_sm_fixture_dir/pairing-code"
+
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "rendered page shows not-paired when pairing-status.json is absent" "$_sm_render_out" "not paired with a coordinator"
+
+cat > "$_sm_fixture_dir/pairing-status.json" <<'EOF'
+{"state":"waiting","code":"ABCD-1234","principalId":"","pairedAtMillis":0,"lastError":"","updatedAtMillis":2000000000000}
+EOF
+cat > "$_sm_fixture_dir/pairing-code" <<'EOF'
+{"code":"ABCD-1234","expiresAtMillis":2000000600000}
+EOF
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "rendered page shows waiting with the pairing code" "$_sm_render_out" "ABCD-1234"
+assert_contains "rendered page shows the code's expiry time" "$_sm_render_out" "Expires at"
+assert_contains "the pairing code is styled to read across a room" "$_sm_render_out" "font-size:3em;font-family:monospace"
+assert_contains "waiting auto-refreshes the page" "$_sm_render_out" '<meta http-equiv="refresh" content="3">'
+assert_contains "the auto-refresh state says so in one sentence" "$_sm_render_out" "refreshes itself every 3 seconds"
+rm -f "$_sm_fixture_dir/pairing-code"
+
+cat > "$_sm_fixture_dir/pairing-status.json" <<'EOF'
+{"state":"paired","code":"","principalId":"p1","pairedAtMillis":2000000000000,"lastError":"","updatedAtMillis":2000000000000}
+EOF
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "rendered page shows paired with a time" "$_sm_render_out" "paired with the coordinator"
+
+cat > "$_sm_fixture_dir/pairing-status.json" <<'EOF'
+{"state":"expired","code":"","principalId":"","pairedAtMillis":0,"lastError":"","updatedAtMillis":2000000000000}
+EOF
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "rendered page shows expired with a button to start again" "$_sm_render_out" "expired before the coordinator confirmed it"
+assert_contains "rendered expired state offers a pairing button" "$_sm_render_out" "Pair with coordinator"
+
+cat > "$_sm_fixture_dir/pairing-status.json" <<'EOF'
+{"state":"failed","code":"","principalId":"","pairedAtMillis":0,"lastError":"<script>alert(1)</script>","updatedAtMillis":2000000000000}
+EOF
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "rendered page shows the failed state's error" "$_sm_render_out" "Pairing failed:"
+assert_not_contains "the failed state's lastError is escaped, never raw markup" "$_sm_render_out" "<script>alert(1)</script>"
+assert_contains "the failed state's lastError renders in escaped form" "$_sm_render_out" "&lt;script&gt;alert(1)&lt;/script&gt;"
+
+rm -f "$_sm_fixture_dir/pairing-status.json" "$_sm_fixture_dir/pairing-code"
+
+# ---------------------------------------------------------------------------
+# Integration: redirect-after-post outcome banners, from the query flags a
+# real redirect would carry.
+# ---------------------------------------------------------------------------
+
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . "smConfigSaved=1" 2>&1)
+assert_contains "the saved-config banner shows after a redirect carries the flag" "$_sm_render_out" "The coordinator address was saved."
+
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . "smConfigError=%3Cscript%3Ealert(2)%3C%2Fscript%3E" 2>&1)
+assert_not_contains "a refused-config error from the redirect is escaped, never raw markup" "$_sm_render_out" "<script>alert(2)</script>"
+assert_contains "a refused-config error from the redirect renders escaped" "$_sm_render_out" "&lt;script&gt;alert(2)&lt;/script&gt;"
+
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . "smPairError=1" 2>&1)
+assert_contains "a failed pairing-request write shows a plain-sentence banner" "$_sm_render_out" "The pairing request could not be saved."
+
+# ---------------------------------------------------------------------------
+# Integration: a POST never re-renders the page; it stops at the redirect,
+# so a browser replaying it via refresh only ever replays a GET.
+# ---------------------------------------------------------------------------
+
+rm -f "$_sm_fixture_dir/pairing-request"
+_sm_post_out=$(sm_php test/php/render_post_fixture.php "$(basename "$_sm_fixture_dir")" . "/plugin.php?plugin=fpp-showmesh" "smAction=pair" 2>&1)
+assert_not_contains "a POST that writes pairing-request never renders the HTML page" "$_sm_post_out" "<!DOCTYPE"
+if [ -f "$_sm_fixture_dir/pairing-request" ]; then
+    pass "the POST still performed the write itself"
+else
+    fail "the POST still performed the write itself" "pairing-request was not created"
+fi
+rm -f "$_sm_fixture_dir/pairing-request"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
