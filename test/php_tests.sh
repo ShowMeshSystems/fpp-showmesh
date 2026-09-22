@@ -185,6 +185,50 @@ assert_contains "rendered page names the backup as the source in use" "$_sm_rend
 rm -f "$_sm_fixture_dir/brightness-state" "$_sm_fixture_dir/brightness-state.bak"
 
 # ---------------------------------------------------------------------------
+# Integration: pairing state rendering, from fixture pairing-status.json /
+# pairing-code files, end to end through the real plugin.php.
+# ---------------------------------------------------------------------------
+
+rm -f "$_sm_fixture_dir/pairing-status.json" "$_sm_fixture_dir/pairing-code"
+
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "rendered page shows not-paired when pairing-status.json is absent" "$_sm_render_out" "not paired with a coordinator"
+
+cat > "$_sm_fixture_dir/pairing-status.json" <<'EOF'
+{"state":"waiting","code":"ABCD-1234","principalId":"","pairedAtMillis":0,"lastError":"","updatedAtMillis":2000000000000}
+EOF
+cat > "$_sm_fixture_dir/pairing-code" <<'EOF'
+{"code":"ABCD-1234","expiresAtMillis":2000000600000}
+EOF
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "rendered page shows waiting with the pairing code" "$_sm_render_out" "ABCD-1234"
+assert_contains "rendered page shows the code's expiry time" "$_sm_render_out" "Expires at"
+rm -f "$_sm_fixture_dir/pairing-code"
+
+cat > "$_sm_fixture_dir/pairing-status.json" <<'EOF'
+{"state":"paired","code":"","principalId":"p1","pairedAtMillis":2000000000000,"lastError":"","updatedAtMillis":2000000000000}
+EOF
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "rendered page shows paired with a time" "$_sm_render_out" "paired with the coordinator"
+
+cat > "$_sm_fixture_dir/pairing-status.json" <<'EOF'
+{"state":"expired","code":"","principalId":"","pairedAtMillis":0,"lastError":"","updatedAtMillis":2000000000000}
+EOF
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "rendered page shows expired with a button to start again" "$_sm_render_out" "expired before the coordinator confirmed it"
+assert_contains "rendered expired state offers a pairing button" "$_sm_render_out" "Pair with coordinator"
+
+cat > "$_sm_fixture_dir/pairing-status.json" <<'EOF'
+{"state":"failed","code":"","principalId":"","pairedAtMillis":0,"lastError":"<script>alert(1)</script>","updatedAtMillis":2000000000000}
+EOF
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "rendered page shows the failed state's error" "$_sm_render_out" "Pairing failed:"
+assert_not_contains "the failed state's lastError is escaped, never raw markup" "$_sm_render_out" "<script>alert(1)</script>"
+assert_contains "the failed state's lastError renders in escaped form" "$_sm_render_out" "&lt;script&gt;alert(1)&lt;/script&gt;"
+
+rm -f "$_sm_fixture_dir/pairing-status.json" "$_sm_fixture_dir/pairing-code"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
