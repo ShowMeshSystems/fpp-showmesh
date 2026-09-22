@@ -1,8 +1,7 @@
 <?php
-/* ShowMesh status and control page. Reads and writes only the state files
- * CONTRACT.md names (config.json, pairing-request, pairing-status.json,
- * pairing-code); never touches the credential file or any token. Every
- * rendered value is escaped. */
+/* ShowMesh status and control page. Reads/writes only the state files
+ * CONTRACT.md names; never touches the credential file or any token.
+ * Every rendered value is escaped. */
 
 require_once __DIR__ . '/lib.php';
 
@@ -20,18 +19,23 @@ if (isset($_GET['smAjax']) && $_GET['smAjax'] === 'brightness') {
     exit;
 }
 
-$smConfigError = null;
-$smConfigSaved = false;
+/* Redirect-after-post: a browser refresh replays a GET, never the POST
+ * that wrote a file, so clicking Pair or Save twice by refreshing never
+ * re-triggers the write. */
 if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['smAction'])) {
+    $requestUri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '/plugin.php';
     if ($_POST['smAction'] === 'save-config') {
         $result = sm_write_config(isset($_POST['coordinatorUrl']) ? $_POST['coordinatorUrl'] : '');
-        if ($result['status'] === 'ok') {
-            $smConfigSaved = true;
-        } else {
-            $smConfigError = $result['reason'];
-        }
+        $target = $result['status'] === 'ok'
+            ? sm_post_redirect_target($requestUri, 'smConfigSaved', '1')
+            : sm_post_redirect_target($requestUri, 'smConfigError', $result['reason']);
     } elseif ($_POST['smAction'] === 'pair') {
-        sm_write_pairing_request();
+        $ok = sm_write_pairing_request();
+        $target = sm_post_redirect_target($requestUri, $ok ? 'smPaired' : 'smPairError', '1');
+    }
+    if (isset($target)) {
+        header('Location: ' . $target, true, 303);
+        exit;
     }
 }
 
@@ -42,10 +46,18 @@ $smConfig = sm_read_config();
 $smPairing = sm_read_pairing_status();
 $smPairingState = $smPairing['status'] === 'ok' ? sm_field($smPairing['data'], 'state') : 'idle';
 $smCoordinatorUrl = $smConfig['status'] === 'ok' ? sm_field($smConfig['data'], 'coordinatorUrl') : '';
+$smConfigSaved = isset($_GET['smConfigSaved']);
+$smConfigError = isset($_GET['smConfigError']) ? $_GET['smConfigError'] : null;
+$smPairRequested = isset($_GET['smPaired']);
+$smPairRequestFailed = isset($_GET['smPairError']);
+$smAutoRefreshPairing = $smPairingState === 'waiting' || ($smPairRequested && $smPairingState === 'idle');
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<?php if ($smAutoRefreshPairing): ?>
+<meta http-equiv="refresh" content="3">
+<?php endif; ?>
 <?php if (is_file('common/menuHead.inc')) { include 'common/menuHead.inc'; } ?>
 <title>ShowMesh Status</title>
 </head>
@@ -81,12 +93,18 @@ $smCoordinatorUrl = $smConfig['status'] === 'ok' ? sm_field($smConfig['data'], '
 </form>
 
 <h2>Pairing</h2>
+<?php if ($smPairRequestFailed): ?>
+<p>The pairing request could not be saved. Try again.</p>
+<?php endif; ?>
+<?php if ($smAutoRefreshPairing): ?>
+<p>This page refreshes itself every 3 seconds until pairing finishes.</p>
+<?php endif; ?>
 <?php if ($smPairingState === 'waiting'):
     $smCode = sm_read_pairing_code();
 ?>
 <p>Waiting for the coordinator to confirm pairing.</p>
 <?php if ($smCode !== null): ?>
-<p class="sm-pairing-code"><?php echo sm_h(sm_field($smCode, 'code')); ?></p>
+<p class="sm-pairing-code" style="font-size:3em;font-family:monospace;letter-spacing:0.3em;"><?php echo sm_h(sm_field($smCode, 'code')); ?></p>
 <?php $smExpires = sm_format_millis_time(sm_field($smCode, 'expiresAtMillis'), 'H:i:s'); ?>
 <p>Expires at <?php echo $smExpires !== null ? sm_h($smExpires) : 'unknown'; ?>.</p>
 <?php endif; ?>

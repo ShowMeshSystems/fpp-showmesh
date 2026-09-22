@@ -251,7 +251,25 @@ t_assert("a valid millis value formats using the given format", sm_format_millis
 $readout = sm_brightness_readout(array('lastAppliedCeiling' => 60, 'ceilingFadeStartMillis' => SM_SHOWMESH_NOW_MILLIS - 1000, 'ceilingFadeEndMillis' => SM_SHOWMESH_NOW_MILLIS + 1000));
 t_assert("brightness readout carries the applied ceiling", $readout['ceiling'] === 60, var_export($readout, true));
 t_assert("brightness readout reports fade active while a fade is running", $readout['fadeActive'] === true, var_export($readout, true));
-t_assert("brightness readout reports unknown fields as null, not fabricated zeros", $readout['transitionGain'] === null && $readout['effectiveOutput'] === null, var_export($readout, true));
+t_assert("brightness readout reports unknown fields as null when the file carries no gain, not a fabricated zero", $readout['transitionGain'] === null && $readout['effectiveOutput'] === null, var_export($readout, true));
+
+$readout = sm_brightness_readout(array('lastAppliedCeiling' => 80, 'lastAppliedGain' => 50));
+t_assert("brightness readout maps transitionGain from lastAppliedGain", $readout['transitionGain'] === 50, var_export($readout, true));
+t_assert("brightness readout computes effectiveOutput as ceiling * gain / 100", $readout['effectiveOutput'] === 40, var_export($readout, true));
+
+$readout = sm_brightness_readout(array('lastAppliedCeiling' => 'not a number', 'lastAppliedGain' => 50));
+t_assert("effectiveOutput is null when the ceiling is not numeric, never a guessed value", $readout['effectiveOutput'] === null, var_export($readout, true));
+
+/* --- redirect-after-post target: drops old flags, keeps the rest --- */
+
+$target = sm_post_redirect_target('/plugin.php?plugin=fpp-showmesh&page=plugin.php', 'smPaired', '1');
+t_assert("a fresh redirect target keeps the page's own query params", strpos($target, 'plugin=fpp-showmesh') !== false, $target);
+t_assert("a fresh redirect target carries the new flag", strpos($target, 'smPaired=1') !== false, $target);
+t_assert("a fresh redirect target keeps the path", strpos($target, '/plugin.php?') === 0, $target);
+
+$target = sm_post_redirect_target('/plugin.php?smConfigSaved=1&plugin=fpp-showmesh', 'smConfigError', 'bad address');
+t_assert("an old outcome flag is dropped when a new one is set", strpos($target, 'smConfigSaved') === false, $target);
+t_assert("the new outcome flag replaces it, value included", strpos($target, 'smConfigError=bad') !== false, $target);
 
 printf("\n== php unit summary ==\n");
 printf("passed: %d\n", $pass);

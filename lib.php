@@ -207,11 +207,9 @@ function sm_write_config($url) {
     return array('status' => 'ok', 'reason' => null);
 }
 
-/* Reads pairing-status.json. A missing file means the worker has never
- * changed pairing state, which is "not paired" rather than "unknown": the
- * worker only writes this file on a state change, so its absence on a
- * fresh install is expected, not a read failure. A present-but-malformed
- * file still degrades to unknown, since that is corruption, not absence. */
+/* Reads pairing-status.json; a missing file means "not paired" (idle),
+ * since the worker only writes this on a state change. Malformed content
+ * still degrades to unknown, since that is corruption, not absence. */
 function sm_read_pairing_status() {
     $path = SM_SHOWMESH_STATE_DIR . '/pairing-status.json';
     if (!is_file($path) || !is_readable($path)) {
@@ -228,10 +226,9 @@ function sm_read_pairing_status() {
     return array('status' => 'ok', 'reason' => null, 'data' => $decoded);
 }
 
-/* Reads pairing-code while a pairing is open. Returns null (not an
- * unknown-shaped array) when absent or malformed, since the page only
- * ever consults this alongside a 'waiting' pairing-status and has nothing
- * useful to say about it on its own. */
+/* Reads pairing-code while a pairing is open. Returns null when absent
+ * or malformed; the page only reads this alongside a 'waiting' state,
+ * so there is nothing else useful to say about it. */
 function sm_read_pairing_code() {
     $path = SM_SHOWMESH_STATE_DIR . '/pairing-code';
     if (!is_file($path) || !is_readable($path)) {
@@ -266,16 +263,33 @@ function sm_format_millis_time($millis, $format) {
     return date($format, (int) ((int) $millis / 1000));
 }
 
-/* Pulls the brightness readout fields (CONTRACT.md's plugin GET route
- * schema) out of a decoded brightness-state document, for the page's own
- * fallback render when the live plugin route is unreachable. Any field
- * the file does not carry renders as null (unknown), never a fabricated
- * zero. */
+/* Builds the redirect-after-post target: same path and query as $requestUri,
+ * minus any earlier outcome flag, plus the new one. Pure string logic so
+ * plugin.php's header()+exit stays a thin wrapper around this. */
+function sm_post_redirect_target($requestUri, $flagKey, $flagValue) {
+    $parts = parse_url($requestUri);
+    $path = isset($parts['path']) ? $parts['path'] : '/plugin.php';
+    parse_str(isset($parts['query']) ? $parts['query'] : '', $query);
+    foreach (array('smConfigSaved', 'smConfigError', 'smPaired', 'smPairError') as $flag) {
+        unset($query[$flag]);
+    }
+    $query[$flagKey] = $flagValue;
+    return $path . '?' . http_build_query($query);
+}
+
+/* Maps brightness-state's own fields to CONTRACT.md's plugin GET route
+ * shape: transitionGain comes from lastAppliedGain, effectiveOutput is
+ * computed from both when numeric, else null (never a fabricated zero). */
 function sm_brightness_readout($data) {
+    $ceiling = sm_field($data, 'lastAppliedCeiling');
+    $gain = sm_field($data, 'lastAppliedGain');
+    $effective = (is_numeric($ceiling) && is_numeric($gain))
+        ? (int) round(((float) $ceiling) * ((float) $gain) / 100)
+        : null;
     return array(
-        'ceiling' => sm_field($data, 'lastAppliedCeiling'),
-        'transitionGain' => sm_field($data, 'transitionGain'),
-        'effectiveOutput' => sm_field($data, 'effectiveOutput'),
+        'ceiling' => $ceiling,
+        'transitionGain' => $gain,
+        'effectiveOutput' => $effective,
         'fadeActive' => sm_ceiling_fade_status($data) === 'running',
     );
 }
