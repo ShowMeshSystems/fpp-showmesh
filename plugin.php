@@ -13,11 +13,6 @@ $smObservation = sm_read_observation_status();
 <head>
 <?php if (is_file('common/menuHead.inc')) { include 'common/menuHead.inc'; } ?>
 <title>ShowMesh Status</title>
-<style>
-/* Matches FPP's own Bootstrap warning/danger palette, since this page
- * does not otherwise pull in FPP's warnings-list styling. */
-.sm-warning-row th, .sm-warning-row td { background-color: #f8d7da; color: #842029; font-weight: bold; }
-</style>
 </head>
 <body>
 <div id="bodyWrapper">
@@ -75,8 +70,8 @@ $smObservation = sm_read_observation_status();
 <tr><th>Last status code</th><td><?php echo sm_h(sm_field($o, 'lastStatusCode')); ?></td></tr>
 <tr><th>Last error</th><td><?php echo sm_h(sm_field($o, 'lastError')); ?></td></tr>
 <?php $reportsRefusedReason = sm_field($o, 'reportsRefusedReason'); ?>
-<?php if ($reportsRefusedReason !== null && $reportsRefusedReason !== ''): ?>
-<tr class="sm-warning-row"><th>Reports refused</th><td><?php echo sm_h($reportsRefusedReason); ?></td></tr>
+<?php if (is_string($reportsRefusedReason) && $reportsRefusedReason !== ''): ?>
+<tr class="alert-danger"><th>Reports refused</th><td><?php echo sm_h($reportsRefusedReason); ?></td></tr>
 <?php endif; ?>
 </table>
 <?php else: ?>

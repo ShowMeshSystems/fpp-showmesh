@@ -161,7 +161,7 @@ assert_contains "rendered page contains the escaped form of configurationError" 
 
 assert_not_contains "rendered page never contains a raw tag from reportsRefusedReason" "$_sm_render_out" "<b>unauthorized</b>"
 assert_contains "rendered page contains the escaped form of reportsRefusedReason" "$_sm_render_out" "&lt;b&gt;unauthorized&lt;/b&gt;"
-assert_contains "rendered page shows the reports-refused warning row when reportsRefusedReason is set" "$_sm_render_out" 'class="sm-warning-row"'
+assert_contains "rendered page shows the reports-refused warning row when reportsRefusedReason is set" "$_sm_render_out" 'class="alert-danger"'
 
 # An accepted outcome carries no reportsRefusedReason at all, matching
 # what the native client actually writes once the notice clears.
@@ -174,7 +174,37 @@ cat > "$_sm_fixture_dir/observation-status.json" <<'EOF'
 }
 EOF
 _sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
-assert_not_contains "rendered page shows no reports-refused warning row once accepted" "$_sm_render_out" 'class="sm-warning-row"'
+assert_not_contains "rendered page shows no reports-refused warning row once accepted" "$_sm_render_out" 'class="alert-danger"'
+
+# An older plugin binary's observation-status.json predates the
+# reportsRefusedReason field entirely: sm_field returns null for a key
+# that is not there at all, and that must render no warning row, the
+# same as an accepted outcome.
+cat > "$_sm_fixture_dir/observation-status.json" <<'EOF'
+{
+  "configured": true,
+  "lastOutcome": "conflict",
+  "lastStatusCode": 409,
+  "lastError": "sequence conflict"
+}
+EOF
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_not_contains "rendered page shows no reports-refused warning row when reportsRefusedReason is absent (older plugin binary)" "$_sm_render_out" 'class="alert-danger"'
+
+# The shape PR #38's coordinator actually writes when it refuses reports:
+# the reason, then ". ", then the fixed remediation sentence.
+cat > "$_sm_fixture_dir/observation-status.json" <<'EOF'
+{
+  "configured": true,
+  "lastOutcome": "conflict",
+  "lastStatusCode": 409,
+  "lastError": "sequence conflict",
+  "reportsRefusedReason": "playlist observation sequence conflict. Clear the playlist observation on the coordinator's Monitor screen, or run showmeshctl fpp reset-observation-sequence"
+}
+EOF
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "rendered page shows the reports-refused warning row for the PR #38-shaped refusal reason" "$_sm_render_out" 'class="alert-danger"'
+assert_contains "rendered page contains the escaped PR #38-shaped refusal sentence" "$_sm_render_out" "playlist observation sequence conflict. Clear the playlist observation on the coordinator&#039;s Monitor screen, or run showmeshctl fpp reset-observation-sequence"
 
 # No brightness-state fixture is present for this render, so the ceiling
 # section must degrade to unknown, not a confident zero.
