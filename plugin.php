@@ -69,6 +69,10 @@ $smObservation = sm_read_observation_status();
 <tr><th>Last outcome</th><td><?php echo sm_h(sm_field($o, 'lastOutcome')); ?></td></tr>
 <tr><th>Last status code</th><td><?php echo sm_h(sm_field($o, 'lastStatusCode')); ?></td></tr>
 <tr><th>Last error</th><td><?php echo sm_h(sm_field($o, 'lastError')); ?></td></tr>
+<?php $reportsRefusedReason = sm_field($o, 'reportsRefusedReason'); ?>
+<?php if (is_string($reportsRefusedReason) && $reportsRefusedReason !== ''): ?>
+<tr class="alert-danger"><th>Reports refused</th><td><?php echo sm_h($reportsRefusedReason); ?></td></tr>
+<?php endif; ?>
 </table>
 <?php else: ?>
 <p>unknown (<?php echo sm_h($smObservation['reason']); ?>)</p>
