@@ -143,7 +143,8 @@ cat > "$_sm_fixture_dir/observation-status.json" <<'EOF'
   "configurationError": "credential file missing\" onerror=\"alert(1)",
   "lastOutcome": "<script>alert(document.cookie)</script>",
   "lastStatusCode": 401,
-  "lastError": "<img src=x onerror=alert(1)>"
+  "lastError": "<img src=x onerror=alert(1)>",
+  "reportsRefusedReason": "<b>unauthorized</b> onerror=\"alert(1)\""
 }
 EOF
 
@@ -157,6 +158,23 @@ assert_contains "rendered page contains the escaped form of lastError" "$_sm_ren
 
 assert_not_contains "rendered page never contains a raw attribute-breakout quote from configurationError" "$_sm_render_out" 'missing" onerror="alert(1)'
 assert_contains "rendered page contains the escaped form of configurationError" "$_sm_render_out" "missing&quot; onerror=&quot;alert(1)"
+
+assert_not_contains "rendered page never contains a raw tag from reportsRefusedReason" "$_sm_render_out" "<b>unauthorized</b>"
+assert_contains "rendered page contains the escaped form of reportsRefusedReason" "$_sm_render_out" "&lt;b&gt;unauthorized&lt;/b&gt;"
+assert_contains "rendered page shows the reports-refused warning row when reportsRefusedReason is set" "$_sm_render_out" 'class="sm-warning-row"'
+
+# An accepted outcome carries no reportsRefusedReason at all, matching
+# what the native client actually writes once the notice clears.
+cat > "$_sm_fixture_dir/observation-status.json" <<'EOF'
+{
+  "configured": true,
+  "lastOutcome": "accepted",
+  "lastStatusCode": 202,
+  "lastError": ""
+}
+EOF
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_not_contains "rendered page shows no reports-refused warning row once accepted" "$_sm_render_out" 'class="sm-warning-row"'
 
 # No brightness-state fixture is present for this render, so the ceiling
 # section must degrade to unknown, not a confident zero.
