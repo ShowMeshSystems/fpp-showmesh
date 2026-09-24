@@ -240,10 +240,17 @@ docs/
   bench-capture-fpp-9.5.3.md  file paths, line numbers, and quoted source for every
                               claim below marked "confirmed against FPP 9.5.3"
 commands/
-  descriptions.json          registers the "ShowMesh: Run Macro" command (a JSON array)
+  descriptions.json          registers "ShowMesh: Run Macro" and the seven night
+                              commands (a JSON array)
   run-macro.sh                the script FPP forks to fire a macro run — lives here,
                               not under scripts/, because FPP resolves a command's
                               "script" relative to commands/
+  night-command.sh            shared body of the night commands: execs
+                              `showmesh-fpp-plugin night <command>`
+  prepare-site.sh, run-readiness.sh, start-preshow.sh, start-night.sh,
+  request-final-show.sh, fade-out-night.sh, power-down-presentation.sh
+                              one per registered night command; FPP passes no
+                              command name, so each script names its own
 scripts/
   fpp_install.sh             validate, fetch, verify, and place the binary; scaffold local state
   fpp_upgrade.sh             additive: same core as install, honored by FPP 10 only

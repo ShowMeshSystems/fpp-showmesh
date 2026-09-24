@@ -2606,6 +2606,14 @@ else
         scripts/fpp_uninstall.sh \
         scripts/preStart.sh \
         commands/run-macro.sh \
+        commands/night-command.sh \
+        commands/prepare-site.sh \
+        commands/run-readiness.sh \
+        commands/start-preshow.sh \
+        commands/start-night.sh \
+        commands/request-final-show.sh \
+        commands/fade-out-night.sh \
+        commands/power-down-presentation.sh \
         test/run_tests.sh
     do
         _sm_recorded_mode=$(cd "$_sm_repo_dir" && "$_sm_git" ls-files -s -- "$_sm_entrypoint" 2>/dev/null | awk '{print $1}')
@@ -2831,6 +2839,23 @@ unset _sm_hc_file _sm_hc_hits
 # someone happened to run the validator against the real tree by hand.
 # Running it here turns that into a standing check instead of a one-time
 # save.
+
+echo "== night commands reach the binary =="
+
+# Each night command's script must hand its own lifecycle command name to
+# the binary, under FPP's bare three-variable environment.
+_sm_night_plugin="$_sm_tmp/night-plugin"
+mkdir -p "$_sm_night_plugin/scripts"
+cp -R "$_sm_repo_dir/commands" "$_sm_night_plugin/commands"
+cp -R "$_sm_repo_dir/scripts/lib" "$_sm_night_plugin/scripts/lib"
+printf '#!/bin/sh\necho "$*"\n' > "$_sm_night_plugin/showmesh-fpp-plugin"
+chmod 0755 "$_sm_night_plugin/showmesh-fpp-plugin"
+for _sm_night_cmd in prepare-site run-readiness start-preshow start-night request-final-show fade-out-night power-down-presentation; do
+    _sm_night_out=$(env -i MEDIADIR=/home/fpp/media FPPDIR=/opt/fpp SCRIPTDIR="$_sm_night_plugin/commands" \
+        /bin/sh "$_sm_night_plugin/commands/$_sm_night_cmd.sh" 2>&1)
+    assert_eq "$_sm_night_cmd.sh sends $_sm_night_cmd to the binary" \
+        "night --config-dir /home/fpp/media/plugindata/fpp-showmesh $_sm_night_cmd" "$_sm_night_out"
+done
 
 echo "== shipped descriptions.json =="
 
