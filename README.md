@@ -1,8 +1,8 @@
 # fpp-showmesh
 
-An FPP (Falcon Player) plugin that registers a command an FPP schedule entry,
-preset, or button can fire to ask a ShowMesh coordinator to run a macro, and
-that records locally what happened.
+An FPP (Falcon Player) plugin that registers commands an FPP schedule entry,
+preset, or button can fire to ask a ShowMesh coordinator to run a macro or to
+prepare, start, and end a night, and that records locally what happened.
 
 ## What this repository is
 
