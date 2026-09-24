@@ -2,7 +2,7 @@
   "repoName": "fpp-showmesh",
   "name": "ShowMesh",
   "author": "ShowMesh Systems",
-  "description": "Fetches and registers the ShowMesh macro-run command so a schedule entry, preset, or button on this FPP host can ask the ShowMesh coordinator to run a macro and read back whether it was accepted.",
+  "description": "Fetches and registers the ShowMesh commands so a schedule entry, preset, or button on this FPP host can ask the ShowMesh coordinator to run a macro or to prepare, start, and end a night, and read back whether it was accepted.",
   "homeURL": "https://github.com/ShowMeshSystems/fpp-showmesh",
   "srcURL": "https://github.com/ShowMeshSystems/fpp-showmesh",
   "bugURL": "https://github.com/ShowMeshSystems/fpp-showmesh/issues",

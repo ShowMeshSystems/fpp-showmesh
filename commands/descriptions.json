@@ -12,5 +12,54 @@
         "optional": false
       }
     ]
+  },
+  {
+    "name": "ShowMeshPrepareSite",
+    "displayName": "ShowMesh: Prepare Site",
+    "displayHint": "Opens today's show preparation in ShowMesh and runs any configured site preparation.",
+    "script": "prepare-site.sh",
+    "args": []
+  },
+  {
+    "name": "ShowMeshRunReadiness",
+    "displayName": "ShowMesh: Run Readiness",
+    "displayHint": "Runs ShowMesh's pre-show checks for today. Start Night needs a passing result from today.",
+    "script": "run-readiness.sh",
+    "args": []
+  },
+  {
+    "name": "ShowMeshStartPreshow",
+    "displayName": "ShowMesh: Start Pre-Show",
+    "displayHint": "Starts the pre-show presentation for today's prepared night.",
+    "script": "start-preshow.sh",
+    "args": []
+  },
+  {
+    "name": "ShowMeshStartNight",
+    "displayName": "ShowMesh: Start Night",
+    "displayHint": "Starts the night: ShowMesh runs the transition into the first show, then loops shows and resting until the final show.",
+    "script": "start-night.sh",
+    "args": []
+  },
+  {
+    "name": "ShowMeshRequestFinalShow",
+    "displayName": "ShowMesh: Request Final Show",
+    "displayHint": "Marks the current or next show as the last one of the night.",
+    "script": "request-final-show.sh",
+    "args": []
+  },
+  {
+    "name": "ShowMeshFadeOutNight",
+    "displayName": "ShowMesh: Fade Out Night",
+    "displayHint": "Ends the night after any running show finishes, and fades out the resting presentation.",
+    "script": "fade-out-night.sh",
+    "args": []
+  },
+  {
+    "name": "ShowMeshPowerDownPresentation",
+    "displayName": "ShowMesh: Power Down Presentation",
+    "displayHint": "Ends the night and removes presentation power, where ShowMesh controls that power.",
+    "script": "power-down-presentation.sh",
+    "args": []
   }
 ]
