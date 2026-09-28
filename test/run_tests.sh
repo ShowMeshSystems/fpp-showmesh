@@ -1060,7 +1060,7 @@ export SHOWMESH_PLUGIN_ARTIFACT_BASE_URL
 rm -f "$_sm_abu_file"
 out=$(sm_artifact_base_url "9.9.9")
 assert_eq "no override file falls back to the pinned default host" \
-    "https://github.com/ShowMeshSystems/showmesh/releases/download/fpp-plugin-v9.9.9" "$out"
+    "https://github.com/ShowMeshSystems/showmesh-fpp-plugin/releases/download/v9.9.9" "$out"
 
 printf 'https://bench.example.invalid/artifacts\n' > "$_sm_abu_file"
 out=$(sm_artifact_base_url "9.9.9")
@@ -1076,7 +1076,7 @@ SHOWMESH_PLUGIN_ARTIFACT_BASE_URL=""
 printf '   \n\t\n' > "$_sm_abu_file"
 out=$(sm_artifact_base_url "9.9.9")
 assert_eq "a whitespace-only override file is treated as absent" \
-    "https://github.com/ShowMeshSystems/showmesh/releases/download/fpp-plugin-v9.9.9" "$out"
+    "https://github.com/ShowMeshSystems/showmesh-fpp-plugin/releases/download/v9.9.9" "$out"
 
 printf 'https://a.example.invalid\nhttps://b.example.invalid\n' > "$_sm_abu_file"
 out=$(sm_artifact_base_url "9.9.9")
