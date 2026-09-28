@@ -67,7 +67,7 @@ Two consequences worth knowing before changing the install path:
 core) fetch a release built and published elsewhere, named and laid out
 like this:
 
-- Release tag: `fpp-plugin-v<VERSION>`
+- Release tag: `v<VERSION>` on `ShowMeshSystems/showmesh-fpp-plugin`
 - Per-architecture asset: `showmesh-fpp-plugin_<VERSION>_linux_<ARCH>.tar.gz`,
   where `<ARCH>` is one of `amd64`, `arm64`, `armv7`
 - Each tarball contains exactly one file, `showmesh-fpp-plugin`, which the
@@ -75,7 +75,7 @@ like this:
 - A checksum manifest, `showmesh-fpp-plugin_<VERSION>_SHA256SUMS`, in
   standard `sha256sum` format, covering every tarball in that release
 - Default host:
-  `https://github.com/ShowMeshSystems/showmesh/releases/download/fpp-plugin-v<VERSION>`
+  `https://github.com/ShowMeshSystems/showmesh-fpp-plugin/releases/download/v<VERSION>`
 
 `<VERSION>` is read from the `VERSION` file at the root of this repository,
 so bumping which release an installed plugin fetches is a one-line change
