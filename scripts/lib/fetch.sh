@@ -43,7 +43,7 @@ sm_artifact_base_url() {
         fi
     fi
 
-    printf 'https://github.com/ShowMeshSystems/showmesh/releases/download/fpp-plugin-v%s\n' "$1"
+    printf 'https://github.com/ShowMeshSystems/showmesh-fpp-plugin/releases/download/v%s\n' "$1"
 }
 
 # The installer's actual trust gate no longer fetches a checksum manifest

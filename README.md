@@ -1,8 +1,8 @@
 # fpp-showmesh
 
-An FPP (Falcon Player) plugin that registers a command an FPP schedule entry,
-preset, or button can fire to ask a ShowMesh coordinator to run a macro, and
-that records locally what happened.
+An FPP (Falcon Player) plugin that registers commands an FPP schedule entry,
+preset, or button can fire to ask a ShowMesh coordinator to run a macro or to
+prepare, start, and end a night, and that records locally what happened.
 
 ## What this repository is
 
@@ -67,7 +67,7 @@ Two consequences worth knowing before changing the install path:
 core) fetch a release built and published elsewhere, named and laid out
 like this:
 
-- Release tag: `fpp-plugin-v<VERSION>`
+- Release tag: `v<VERSION>` on `ShowMeshSystems/showmesh-fpp-plugin`
 - Per-architecture asset: `showmesh-fpp-plugin_<VERSION>_linux_<ARCH>.tar.gz`,
   where `<ARCH>` is one of `amd64`, `arm64`, `armv7`
 - Each tarball contains exactly one file, `showmesh-fpp-plugin`, which the
@@ -75,7 +75,7 @@ like this:
 - A checksum manifest, `showmesh-fpp-plugin_<VERSION>_SHA256SUMS`, in
   standard `sha256sum` format, covering every tarball in that release
 - Default host:
-  `https://github.com/ShowMeshSystems/showmesh/releases/download/fpp-plugin-v<VERSION>`
+  `https://github.com/ShowMeshSystems/showmesh-fpp-plugin/releases/download/v<VERSION>`
 
 `<VERSION>` is read from the `VERSION` file at the root of this repository,
 so bumping which release an installed plugin fetches is a one-line change
@@ -234,16 +234,24 @@ method resolves only exists for a 64-bit kernel report.
 
 ```
 pluginInfo.json              FPP's plugin manifest (strict JSON)
+status_menu.inc              adds "ShowMesh" to FPP's Status/Control menu, linking plugin.php
 VERSION                      the release version scripts/fpp_install.sh fetches
 artifacts.lock.json          the trust anchor: expected filename/sha256 per artifact for VERSION
 docs/
   bench-capture-fpp-9.5.3.md  file paths, line numbers, and quoted source for every
                               claim below marked "confirmed against FPP 9.5.3"
 commands/
-  descriptions.json          registers the "ShowMesh: Run Macro" command (a JSON array)
+  descriptions.json          registers "ShowMesh: Run Macro" and the seven night
+                              commands (a JSON array)
   run-macro.sh                the script FPP forks to fire a macro run — lives here,
                               not under scripts/, because FPP resolves a command's
                               "script" relative to commands/
+  night-command.sh            shared body of the night commands: execs
+                              `showmesh-fpp-plugin night <command>`
+  prepare-site.sh, run-readiness.sh, start-preshow.sh, start-night.sh,
+  request-final-show.sh, fade-out-night.sh, power-down-presentation.sh
+                              one per registered night command; FPP passes no
+                              command name, so each script names its own
 scripts/
   fpp_install.sh             validate, fetch, verify, and place the binary; scaffold local state
   fpp_upgrade.sh             additive: same core as install, honored by FPP 10 only
