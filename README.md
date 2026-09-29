@@ -234,6 +234,7 @@ method resolves only exists for a 64-bit kernel report.
 
 ```
 pluginInfo.json              FPP's plugin manifest (strict JSON)
+status_menu.inc              adds "ShowMesh" to FPP's Status/Control menu, linking plugin.php
 VERSION                      the release version scripts/fpp_install.sh fetches
 artifacts.lock.json          the trust anchor: expected filename/sha256 per artifact for VERSION
 docs/
