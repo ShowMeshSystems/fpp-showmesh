@@ -150,3 +150,146 @@ function sm_ceiling_fade_status($data) {
 function sm_field($data, $key) {
     return isset($data[$key]) ? $data[$key] : null;
 }
+
+/* Reads <statedir>/config.json. Same degrade shape as the other readers;
+ * missing/malformed both render unknown rather than an empty string that
+ * could be mistaken for "no coordinator configured on purpose". */
+function sm_read_config() {
+    $path = SM_SHOWMESH_STATE_DIR . '/config.json';
+    if (!is_file($path) || !is_readable($path)) {
+        return array('status' => 'unknown', 'reason' => 'file missing or unreadable', 'data' => null);
+    }
+    $contents = @file_get_contents($path);
+    if ($contents === false || trim($contents) === '') {
+        return array('status' => 'unknown', 'reason' => 'file empty or unreadable', 'data' => null);
+    }
+    $decoded = json_decode($contents, true);
+    if (!is_array($decoded)) {
+        return array('status' => 'unknown', 'reason' => 'malformed JSON', 'data' => null);
+    }
+    return array('status' => 'ok', 'reason' => null, 'data' => $decoded);
+}
+
+/* Validates a coordinator address per CONTRACT.md: must parse as a full
+ * http or https address with a host. Returns null when valid, or a plain
+ * sentence naming what is wrong, for the page to show as a refusal. */
+function sm_validate_coordinator_url($url) {
+    $url = trim((string) $url);
+    if ($url === '') {
+        return 'The coordinator address is empty.';
+    }
+    $parts = parse_url($url);
+    $scheme = is_array($parts) && isset($parts['scheme']) ? strtolower($parts['scheme']) : null;
+    $host = is_array($parts) && isset($parts['host']) ? $parts['host'] : '';
+    if ($scheme !== 'http' && $scheme !== 'https') {
+        return 'The coordinator address must start with http:// or https://.';
+    }
+    if ($host === '') {
+        return 'The coordinator address is missing a host.';
+    }
+    return null;
+}
+
+/* Validates and writes config.json as {"coordinatorUrl":"<url>"}. Returns
+ * array('status' => 'ok'|'error', 'reason' => string|null). Never writes
+ * on a validation failure. */
+function sm_write_config($url) {
+    $url = trim((string) $url);
+    $error = sm_validate_coordinator_url($url);
+    if ($error !== null) {
+        return array('status' => 'error', 'reason' => $error);
+    }
+    $path = SM_SHOWMESH_STATE_DIR . '/config.json';
+    $written = @file_put_contents($path, json_encode(array('coordinatorUrl' => $url)));
+    if ($written === false) {
+        return array('status' => 'error', 'reason' => 'The coordinator address could not be saved.');
+    }
+    return array('status' => 'ok', 'reason' => null);
+}
+
+/* Reads pairing-status.json; a missing file means "not paired" (idle),
+ * since the worker only writes this on a state change. Malformed content
+ * still degrades to unknown, since that is corruption, not absence. */
+function sm_read_pairing_status() {
+    $path = SM_SHOWMESH_STATE_DIR . '/pairing-status.json';
+    if (!is_file($path) || !is_readable($path)) {
+        return array('status' => 'ok', 'reason' => null, 'data' => array('state' => 'idle'));
+    }
+    $contents = @file_get_contents($path);
+    if ($contents === false || trim($contents) === '') {
+        return array('status' => 'ok', 'reason' => null, 'data' => array('state' => 'idle'));
+    }
+    $decoded = json_decode($contents, true);
+    if (!is_array($decoded) || !isset($decoded['state'])) {
+        return array('status' => 'unknown', 'reason' => 'malformed JSON', 'data' => null);
+    }
+    return array('status' => 'ok', 'reason' => null, 'data' => $decoded);
+}
+
+/* Reads pairing-code while a pairing is open. Returns null when absent
+ * or malformed; the page only reads this alongside a 'waiting' state,
+ * so there is nothing else useful to say about it. */
+function sm_read_pairing_code() {
+    $path = SM_SHOWMESH_STATE_DIR . '/pairing-code';
+    if (!is_file($path) || !is_readable($path)) {
+        return null;
+    }
+    $contents = @file_get_contents($path);
+    if ($contents === false || trim($contents) === '') {
+        return null;
+    }
+    $decoded = json_decode($contents, true);
+    if (!is_array($decoded) || !isset($decoded['code'])) {
+        return null;
+    }
+    return $decoded;
+}
+
+/* Writes pairing-request to ask the worker to start (or restart) pairing.
+ * Returns true on success. */
+function sm_write_pairing_request() {
+    $path = SM_SHOWMESH_STATE_DIR . '/pairing-request';
+    $written = @file_put_contents($path, json_encode(array('requestedAtMillis' => SM_SHOWMESH_NOW_MILLIS)));
+    return $written !== false;
+}
+
+/* $millis is a millisecond timestamp. Returns null when it is not a
+ * positive number, so callers render "unknown" instead of a bogus clock
+ * time such as 1970's midnight. */
+function sm_format_millis_time($millis, $format) {
+    if (!is_numeric($millis) || $millis <= 0) {
+        return null;
+    }
+    return date($format, (int) ((int) $millis / 1000));
+}
+
+/* Builds the redirect-after-post target: same path and query as $requestUri,
+ * minus any earlier outcome flag, plus the new one. Pure string logic so
+ * plugin.php's header()+exit stays a thin wrapper around this. */
+function sm_post_redirect_target($requestUri, $flagKey, $flagValue) {
+    $parts = parse_url($requestUri);
+    $path = isset($parts['path']) ? $parts['path'] : '/plugin.php';
+    parse_str(isset($parts['query']) ? $parts['query'] : '', $query);
+    foreach (array('smConfigSaved', 'smConfigError', 'smPaired', 'smPairError') as $flag) {
+        unset($query[$flag]);
+    }
+    $query[$flagKey] = $flagValue;
+    return $path . '?' . http_build_query($query);
+}
+
+/* Maps brightness-state's own fields to CONTRACT.md's plugin GET route
+ * shape: transitionGain comes from lastAppliedGain, effectiveOutput is
+ * computed from both when numeric, else null (never a fabricated zero). */
+function sm_brightness_readout($data) {
+    $ceiling = sm_field($data, 'lastAppliedCeiling');
+    $gain = sm_field($data, 'lastAppliedGain');
+    $effective = (is_numeric($ceiling) && is_numeric($gain))
+        ? (int) round(((float) $ceiling) * ((float) $gain) / 100)
+        : null;
+    return array(
+        'ceiling' => $ceiling,
+        'transitionGain' => $gain,
+        'effectiveOutput' => $effective,
+        'fadeActive' => sm_ceiling_fade_status($data) === 'running',
+    );
+}
