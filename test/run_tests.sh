@@ -2857,6 +2857,36 @@ for _sm_night_cmd in prepare-site run-readiness start-preshow start-night reques
         "night --config-dir /home/fpp/media/plugindata/fpp-showmesh $_sm_night_cmd" "$_sm_night_out"
 done
 
+# prepare-site's optional "Stop playlists" argument reaches the binary as
+# --stop-playlists only when it is true; absent or false is today's call.
+for _sm_stop_case in "absent|" "false|false" "empty|''" "true|true"; do
+    _sm_stop_name=${_sm_stop_case%%|*}
+    _sm_stop_arg=${_sm_stop_case#*|}
+    case "$_sm_stop_name" in
+        absent) _sm_stop_out=$(env -i MEDIADIR=/home/fpp/media FPPDIR=/opt/fpp SCRIPTDIR="$_sm_night_plugin/commands" \
+            /bin/sh "$_sm_night_plugin/commands/prepare-site.sh" 2>&1) ;;
+        empty) _sm_stop_out=$(env -i MEDIADIR=/home/fpp/media FPPDIR=/opt/fpp SCRIPTDIR="$_sm_night_plugin/commands" \
+            /bin/sh "$_sm_night_plugin/commands/prepare-site.sh" "" 2>&1) ;;
+        *) _sm_stop_out=$(env -i MEDIADIR=/home/fpp/media FPPDIR=/opt/fpp SCRIPTDIR="$_sm_night_plugin/commands" \
+            /bin/sh "$_sm_night_plugin/commands/prepare-site.sh" "$_sm_stop_arg" 2>&1) ;;
+    esac
+    _sm_stop_want="night --config-dir /home/fpp/media/plugindata/fpp-showmesh prepare-site"
+    [ "$_sm_stop_name" = true ] && _sm_stop_want="$_sm_stop_want --stop-playlists"
+    assert_eq "prepare-site.sh with Stop playlists $_sm_stop_name" "$_sm_stop_want" "$_sm_stop_out"
+done
+
+# The shipped description declares the argument, optional and off by default.
+if python3 -c '
+import json, sys
+cmd = [c for c in json.load(open(sys.argv[1])) if c["name"] == "ShowMeshPrepareSite"][0]
+arg = cmd["args"][0]
+sys.exit(0 if (arg["description"], arg["type"], arg["optional"], arg["default"]) == ("Stop playlists", "bool", True, False) and "also stops that playlist" in arg["tip"] and len(cmd["args"]) == 1 else 1)
+' "$_sm_repo_dir/commands/descriptions.json"; then
+    pass "ShowMeshPrepareSite declares one optional Stop playlists boolean, default false"
+else
+    fail "ShowMeshPrepareSite declares one optional Stop playlists boolean, default false" "the shipped description differs"
+fi
+
 echo "== shipped descriptions.json =="
 
 if sm_validate_command_scripts "$_sm_repo_dir"; then

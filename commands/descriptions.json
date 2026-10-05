@@ -18,7 +18,16 @@
     "displayName": "ShowMesh: Prepare Site",
     "displayHint": "Opens today's show preparation in ShowMesh and runs any configured site preparation.",
     "script": "prepare-site.sh",
-    "args": []
+    "args": [
+      {
+        "name": "stopPlaylists",
+        "description": "Stop playlists",
+        "tip": "Also stops whatever FPP is playing. Turning this on from inside a playlist also stops that playlist.",
+        "type": "bool",
+        "optional": true,
+        "default": false
+      }
+    ]
   },
   {
     "name": "ShowMeshRunReadiness",

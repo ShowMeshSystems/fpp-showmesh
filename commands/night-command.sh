@@ -20,4 +20,5 @@ if [ ! -x "$_sm_binary" ]; then
     exit 1
 fi
 
-exec "$_sm_binary" night --config-dir "$(sm_state_dir)" "$_sm_night_command"
+shift
+exec "$_sm_binary" night --config-dir "$(sm_state_dir)" "$_sm_night_command" "$@"
