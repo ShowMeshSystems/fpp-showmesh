@@ -2880,7 +2880,7 @@ if python3 -c '
 import json, sys
 cmd = [c for c in json.load(open(sys.argv[1])) if c["name"] == "ShowMeshPrepareSite"][0]
 arg = cmd["args"][0]
-sys.exit(0 if (arg["description"], arg["type"], arg["optional"], arg["default"]) == ("Stop playlists", "bool", True, False) and "also stops that playlist" in arg["tip"] and len(cmd["args"]) == 1 else 1)
+sys.exit(0 if (arg["description"], arg["type"], arg["optional"], arg["default"]) == ("Stop playlists (also stops the playlist running this command)", "bool", True, False) and "also stops that playlist" in arg["help"] and "tip" not in arg and len(cmd["args"]) == 1 else 1)
 ' "$_sm_repo_dir/commands/descriptions.json"; then
     pass "ShowMeshPrepareSite declares one optional Stop playlists boolean, default false"
 else

@@ -21,8 +21,8 @@
     "args": [
       {
         "name": "stopPlaylists",
-        "description": "Stop playlists",
-        "tip": "Also stops whatever FPP is playing. Turning this on from inside a playlist also stops that playlist.",
+        "description": "Stop playlists (also stops the playlist running this command)",
+        "help": "Also stops whatever FPP is playing. Turning this on from inside a playlist also stops that playlist.",
         "type": "bool",
         "optional": true,
         "default": false
