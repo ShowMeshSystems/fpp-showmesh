@@ -22,8 +22,8 @@ if (isset($_GET['smAjax']) && $_GET['smAjax'] === 'brightness') {
 /* Redirect-after-post: a browser refresh replays a GET, never the POST
  * that wrote a file, so clicking Pair or Save twice by refreshing never
  * re-triggers the write. */
+$requestUri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '/plugin.php';
 if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['smAction'])) {
-    $requestUri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '/plugin.php';
     if ($_POST['smAction'] === 'save-config') {
         $result = sm_write_config(isset($_POST['coordinatorUrl']) ? $_POST['coordinatorUrl'] : '');
         $target = $result['status'] === 'ok'
@@ -34,7 +34,7 @@ if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST' &
         $target = sm_post_redirect_target($requestUri, $ok ? 'smPaired' : 'smPairError', '1');
     }
     if (isset($target)) {
-        header('Location: ' . $target, true, 303);
+        sm_send_redirect($target);
         exit;
     }
 }
@@ -50,6 +50,7 @@ $smConfigSaved = isset($_GET['smConfigSaved']);
 $smConfigError = isset($_GET['smConfigError']) ? $_GET['smConfigError'] : null;
 $smPairRequested = isset($_GET['smPaired']);
 $smPairRequestFailed = isset($_GET['smPairError']);
+$smPostAction = sm_post_action_target($requestUri);
 $smAutoRefreshPairing = $smPairingState === 'waiting' || ($smPairRequested && $smPairingState === 'idle');
 ?>
 <!DOCTYPE html>
@@ -84,7 +85,7 @@ $smAutoRefreshPairing = $smPairingState === 'waiting' || ($smPairRequested && $s
 <?php elseif ($smConfigError !== null): ?>
 <p><?php echo sm_h($smConfigError); ?> Nothing was saved.</p>
 <?php endif; ?>
-<form method="post">
+<form method="post" action="<?php echo sm_h($smPostAction); ?>">
 <input type="hidden" name="smAction" value="save-config">
 <label for="smCoordinatorUrl">Coordinator address</label>
 <input type="text" id="smCoordinatorUrl" name="coordinatorUrl" size="40"
@@ -112,25 +113,25 @@ $smAutoRefreshPairing = $smPairingState === 'waiting' || ($smPairRequested && $s
     $smPairedAt = sm_format_millis_time(sm_field($smPairing['data'], 'pairedAtMillis'), 'H:i');
 ?>
 <p>This FPP is paired with the coordinator<?php echo $smPairedAt !== null ? ', as of ' . sm_h($smPairedAt) . '.' : '.'; ?></p>
-<form method="post">
+<form method="post" action="<?php echo sm_h($smPostAction); ?>">
 <input type="hidden" name="smAction" value="pair">
 <button type="submit">Pair with coordinator</button>
 </form>
 <?php elseif ($smPairingState === 'expired'): ?>
 <p>The pairing code expired before the coordinator confirmed it.</p>
-<form method="post">
+<form method="post" action="<?php echo sm_h($smPostAction); ?>">
 <input type="hidden" name="smAction" value="pair">
 <button type="submit">Pair with coordinator</button>
 </form>
 <?php elseif ($smPairingState === 'failed'): ?>
 <p>Pairing failed: <?php echo sm_h(sm_field($smPairing['data'], 'lastError')); ?>.</p>
-<form method="post">
+<form method="post" action="<?php echo sm_h($smPostAction); ?>">
 <input type="hidden" name="smAction" value="pair">
 <button type="submit">Pair with coordinator</button>
 </form>
 <?php else: ?>
 <p>This FPP is not paired with a coordinator.</p>
-<form method="post">
+<form method="post" action="<?php echo sm_h($smPostAction); ?>">
 <input type="hidden" name="smAction" value="pair">
 <button type="submit">Pair with coordinator</button>
 </form>

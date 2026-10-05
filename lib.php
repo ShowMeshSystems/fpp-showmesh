@@ -267,14 +267,39 @@ function sm_format_millis_time($millis, $format) {
  * minus any earlier outcome flag, plus the new one. Pure string logic so
  * plugin.php's header()+exit stays a thin wrapper around this. */
 function sm_post_redirect_target($requestUri, $flagKey, $flagValue) {
+    list($path, $query) = sm_page_uri_parts($requestUri);
+    $query[$flagKey] = $flagValue;
+    return $path . '?' . http_build_query($query);
+}
+
+/* Where the page's forms post. nopage=1 makes FPP's page wrapper send
+ * nothing ahead of this page, so the redirect header can still be sent. */
+function sm_post_action_target($requestUri) {
+    list($path, $query) = sm_page_uri_parts($requestUri);
+    $query['nopage'] = '1';
+    return $path . '?' . http_build_query($query);
+}
+
+function sm_page_uri_parts($requestUri) {
     $parts = parse_url($requestUri);
     $path = isset($parts['path']) ? $parts['path'] : '/plugin.php';
     parse_str(isset($parts['query']) ? $parts['query'] : '', $query);
-    foreach (array('smConfigSaved', 'smConfigError', 'smPaired', 'smPairError') as $flag) {
+    foreach (array('smConfigSaved', 'smConfigError', 'smPaired', 'smPairError', 'nopage') as $flag) {
         unset($query[$flag]);
     }
-    $query[$flagKey] = $flagValue;
-    return $path . '?' . http_build_query($query);
+    return array($path, $query);
+}
+
+/* Sends the browser to $target. Once markup is already on the wire a
+ * Location header is dropped, so the script and link carry it instead. */
+function sm_send_redirect($target) {
+    if (!headers_sent()) {
+        header('Location: ' . $target, true, 303);
+        return;
+    }
+    $flags = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT;
+    echo '<script>window.location.replace(' . json_encode($target, $flags) . ');</script>';
+    echo '<p><a href="' . sm_h($target) . '">Return to the ShowMesh page</a></p>';
 }
 
 /* Maps brightness-state's own fields to CONTRACT.md's plugin GET route

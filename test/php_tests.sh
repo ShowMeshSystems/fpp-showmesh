@@ -309,6 +309,17 @@ else
 fi
 rm -f "$_sm_fixture_dir/pairing-request"
 
+# FPP's page wrapper sends its own markup before it includes plugin.php.
+# The Location header is dropped then, so the POST must still send the
+# browser back to the page instead of ending on an empty one.
+_sm_post_out=$(sm_php test/php/render_post_fixture.php "$(basename "$_sm_fixture_dir")" . "/plugin.php?plugin=fpp-showmesh&page=plugin.php" "smAction=pair" wrapped 2>&1)
+assert_contains "a POST behind FPP's page wrapper still sends the browser back" "$_sm_post_out" 'window.location.replace("\/plugin.php?plugin=fpp-showmesh\u0026page=plugin.php\u0026smPaired=1")'
+assert_contains "a POST behind FPP's page wrapper offers a link back" "$_sm_post_out" 'href="/plugin.php?plugin=fpp-showmesh&amp;page=plugin.php&amp;smPaired=1"'
+rm -f "$_sm_fixture_dir/pairing-request"
+
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "the page's forms post past FPP's page wrapper" "$_sm_render_out" 'nopage=1">'
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
