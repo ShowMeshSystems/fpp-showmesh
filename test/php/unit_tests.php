@@ -267,6 +267,14 @@ t_assert("a fresh redirect target keeps the page's own query params", strpos($ta
 t_assert("a fresh redirect target carries the new flag", strpos($target, 'smPaired=1') !== false, $target);
 t_assert("a fresh redirect target keeps the path", strpos($target, '/plugin.php?') === 0, $target);
 
+$target = sm_post_redirect_target('/plugin.php?plugin=fpp-showmesh&nopage=1', 'smPaired', '1');
+t_assert("a redirect target drops nopage so the full page renders", strpos($target, 'nopage') === false, $target);
+
+$action = sm_post_action_target('/plugin.php?plugin=fpp-showmesh&page=plugin.php&smPaired=1');
+t_assert("a form action keeps the page's own query params", strpos($action, 'plugin=fpp-showmesh&page=plugin.php') !== false, $action);
+t_assert("a form action asks FPP for no page wrapper", strpos($action, 'nopage=1') !== false, $action);
+t_assert("a form action drops old outcome flags", strpos($action, 'smPaired') === false, $action);
+
 $target = sm_post_redirect_target('/plugin.php?smConfigSaved=1&plugin=fpp-showmesh', 'smConfigError', 'bad address');
 t_assert("an old outcome flag is dropped when a new one is set", strpos($target, 'smConfigSaved') === false, $target);
 t_assert("the new outcome flag replaces it, value included", strpos($target, 'smConfigError=bad') !== false, $target);
