@@ -1898,6 +1898,128 @@ else
 $(cat "$_sm_reassert_log")"
 fi
 
+echo "== coordinator key directory =="
+
+# The plugin trusts a key only from a root-owned directory, so this one is
+# never chowned to fpp:fpp and nothing ever recurses into it. SM_TRUST_OWNER
+# is the test-only override, the same pattern as SM_SCAFFOLD_STAGE_OWNER.
+_sm_trust_default=$(sm_trust_dir)
+assert_eq "the coordinator key directory is the documented /etc path" "/etc/showmesh-fpp-plugin-trust" "$_sm_trust_default"
+case "$_sm_trust_default" in
+    "$_sm_cred_default"/*|"$_sm_cred_default")
+        fail "the coordinator key directory is not inside the credential directory" "trust dir: $_sm_trust_default, credential dir: $_sm_cred_default"
+        ;;
+    *)
+        pass "the coordinator key directory is not inside the credential directory"
+        ;;
+esac
+
+_sm_trust_test_dir="$_sm_tmp/trust-dir-tests"
+mkdir -p "$_sm_trust_test_dir/fake-bin"
+_sm_trust_chown_log="$_sm_trust_test_dir/chown-calls.log"
+: > "$_sm_trust_chown_log"
+cat > "$_sm_trust_test_dir/fake-bin/chown" <<FAKE
+#!/bin/sh
+printf '%s\n' "\$*" >> "$_sm_trust_chown_log"
+exit 0
+FAKE
+chmod 0755 "$_sm_trust_test_dir/fake-bin/chown"
+
+sm_resolve_bin() {
+    case "$1" in
+        chown) printf '%s\n' "$_sm_trust_test_dir/fake-bin/chown"; return 0 ;;
+    esac
+    _sm_trust_name="$1"
+    shift
+    for _sm_trust_candidate in "$@"; do
+        if [ -x "$_sm_trust_candidate" ]; then
+            printf '%s\n' "$_sm_trust_candidate"
+            return 0
+        fi
+    done
+    sm_log_err "required tool not found: $_sm_trust_name (checked: $*)"
+    return 1
+}
+
+_sm_trust_real="$_sm_trust_test_dir/etc/trust"
+sm_trust_dir() { printf '%s\n' "$_sm_trust_real"; }
+sm_ensure_trust_dir
+status=$?
+assert_success "sm_ensure_trust_dir creates the directory" "$status"
+assert_eq "the coordinator key directory is mode 0755" "755" "$(sm_current_mode "$_sm_trust_real")"
+assert_eq "the directory is chowned to root:root by default, as a symlink-safe chown of the directory only" "-h root:root $_sm_trust_real" "$(cat "$_sm_trust_chown_log")"
+if grep -E -e '(^| )-[A-Za-z]*R' -e 'fpp:' "$_sm_trust_chown_log" >/dev/null 2>&1; then
+    fail "the coordinator key directory is never chowned recursively or to fpp" "$(cat "$_sm_trust_chown_log")"
+else
+    pass "the coordinator key directory is never chowned recursively or to fpp"
+fi
+
+# An upgrade or a preStart repair runs this again and must leave the key alone.
+printf 'stored-key\n' > "$_sm_trust_real/coordinator-fallback-public-key"
+chmod 0644 "$_sm_trust_real/coordinator-fallback-public-key"
+chmod 0700 "$_sm_trust_real"
+sm_ensure_trust_dir
+status=$?
+assert_success "sm_ensure_trust_dir succeeds against an existing directory" "$status"
+assert_eq "an existing directory is set back to mode 0755" "755" "$(sm_current_mode "$_sm_trust_real")"
+assert_eq "the stored key is untouched by a second run" "stored-key" "$(cat "$_sm_trust_real/coordinator-fallback-public-key")"
+assert_eq "the stored key keeps its mode" "644" "$(sm_current_mode "$_sm_trust_real/coordinator-fallback-public-key")"
+assert_eq "no chown ever named the key file" "" "$(grep -F coordinator-fallback-public-key "$_sm_trust_chown_log")"
+
+_sm_trust_elsewhere="$_sm_trust_test_dir/elsewhere"
+mkdir -p "$_sm_trust_elsewhere"
+chmod 0700 "$_sm_trust_elsewhere"
+_sm_trust_link="$_sm_trust_test_dir/etc/trust-link"
+ln -s "$_sm_trust_elsewhere" "$_sm_trust_link"
+sm_trust_dir() { printf '%s\n' "$_sm_trust_link"; }
+out=$(sm_ensure_trust_dir 2>&1)
+status=$?
+assert_failure "sm_ensure_trust_dir refuses a symlink at the directory path" "$status"
+assert_eq "a symlinked target is left at its own mode" "700" "$(sm_current_mode "$_sm_trust_elsewhere")"
+
+_sm_trust_deep_link="$_sm_trust_test_dir/etc/parent-link"
+ln -s "$_sm_trust_elsewhere" "$_sm_trust_deep_link"
+sm_trust_dir() { printf '%s\n' "$_sm_trust_deep_link/trust"; }
+out=$(sm_ensure_trust_dir 2>&1)
+status=$?
+assert_failure "sm_ensure_trust_dir refuses a symlinked parent component" "$status"
+assert_eq "nothing is created behind a symlinked parent component" "" "$(ls -A "$_sm_trust_elsewhere")"
+
+# The whole scaffold, the function every install, upgrade and repair calls, creates it too.
+_sm_trust_scaffold="$_sm_trust_test_dir/scaffold-run"
+mkdir -p "$_sm_trust_scaffold"
+sm_credential_dir() { printf '%s\n' "$_sm_trust_scaffold/cred"; }
+sm_state_dir() { printf '%s\n' "$_sm_trust_scaffold/state"; }
+sm_trust_dir() { printf '%s\n' "$_sm_trust_scaffold/trust"; }
+sm_ensure_config_scaffold >/dev/null 2>&1
+status=$?
+assert_success "sm_ensure_config_scaffold succeeds with all three directories redirected" "$status"
+assert_eq "sm_ensure_config_scaffold creates the coordinator key directory at mode 0755" "755" "$(sm_current_mode "$_sm_trust_scaffold/trust")"
+
+# The real uninstall script, against a copy whose three fixed paths point into the tmp tree.
+_sm_trust_unin="$_sm_trust_test_dir/uninstall-copy"
+mkdir -p "$_sm_trust_unin"
+cp -R "$_sm_repo_dir/scripts" "$_sm_trust_unin/scripts"
+sed -e "s#\"/etc/showmesh-fpp-plugin-trust\"#\"$_sm_trust_unin/trust\"#" \
+    -e "s#\"/etc/showmesh-fpp-plugin\"#\"$_sm_trust_unin/cred\"#" \
+    -e "s#\"/home/fpp/media/plugindata/fpp-showmesh\"#\"$_sm_trust_unin/state\"#" \
+    "$_sm_repo_dir/scripts/lib/common.sh" > "$_sm_trust_unin/scripts/lib/common.sh"
+mkdir -p "$_sm_trust_unin/trust" "$_sm_trust_unin/cred" "$_sm_trust_unin/state"
+printf 'stored-key\n' > "$_sm_trust_unin/trust/coordinator-fallback-public-key"
+out=$(SM_SCAFFOLD_STAGE_ROOT="$_sm_trust_unin/stage" sh "$_sm_trust_unin/scripts/fpp_uninstall.sh" 2>&1)
+status=$?
+assert_success "fpp_uninstall.sh succeeds" "$status"
+assert_eq "fpp_uninstall.sh removes the coordinator key directory and the key in it" "" "$( [ -e "$_sm_trust_unin/trust" ] && echo present )"
+out=$(SM_SCAFFOLD_STAGE_ROOT="$_sm_trust_unin/stage" sh "$_sm_trust_unin/scripts/fpp_uninstall.sh" 2>&1)
+status=$?
+assert_success "fpp_uninstall.sh is idempotent with the coordinator key directory already gone" "$status"
+assert_contains "the second uninstall says there was nothing to remove" "$out" "no coordinator key directory"
+
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/common.sh"
+# shellcheck disable=SC1090
+. "$_sm_lib_dir/install-core.sh"
+
 echo "== no /proc dependency remains =="
 
 # sm_scaffold_activate_cross_device (the EXDEV fallback that set

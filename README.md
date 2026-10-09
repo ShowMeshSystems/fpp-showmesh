@@ -422,8 +422,16 @@ FPP's tree entirely.
   records which architecture was actually fetched, so `preStart.sh` can
   compare a fresh detection against it (see above). Gitignored, like the
   binary itself.
+- **Coordinator key directory:** `/etc/showmesh-fpp-plugin-trust/`, mode
+  `0755`, owned `root:root` and never chowned to `fpp:fpp`. The plugin stores
+  the coordinator's public key here when the player pairs, and trusts a
+  fallback program only if this directory and the key file in it are
+  root-owned. It is separate from the credential directory because that one
+  belongs to `fpp:fpp`, and a key in a directory `fpp` owns could be replaced by
+  anything running as `fpp`. An upgrade and a repair leave its contents alone,
+  and `fpp_uninstall.sh` removes it.
 - **Scaffold staging directory:** `/etc/showmesh-fpp-plugin.stage`, mode
-  `0700`, owned `root:root` — a third location outside the plugin
+  `0700`, owned `root:root`, another location outside the plugin
   directory, not a sibling of either directory above and never chowned
   to `fpp:fpp`; every credential and state file is prepared inside it
   before being renamed into place (see the trust-boundary section
