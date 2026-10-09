@@ -298,6 +298,10 @@ sm_ensure_config_scaffold() {
         sm_scaffold_file "$_sm_fpath" 0600 "$_sm_default" || return 1
     done
 
+    # The coordinator's key directory: root-owned, so it is not made by
+    # sm_scaffold_dir, and its contents belong to the plugin's pairing.
+    sm_ensure_trust_dir || return 1
+
     return 0
 }
 

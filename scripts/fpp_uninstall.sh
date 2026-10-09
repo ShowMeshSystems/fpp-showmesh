@@ -10,8 +10,11 @@
 # script must not touch the plugin directory itself; FPP owns removing
 # that, and this script is still running from inside it while it executes.
 #
+# Also removes the coordinator key directory (sm_trust_dir() in
+# lib/common.sh), which pairing fills and nothing else on the host cleans up.
+#
 # Also removes the root-only scaffold staging directory
-# (sm_scaffold_stage_root() in lib/common.sh), a third location outside
+# (sm_scaffold_stage_root() in lib/common.sh), another location outside
 # the plugin directory that install/upgrade/repair creates and that
 # nothing else on the host ever cleans up.
 #
@@ -48,6 +51,14 @@ if [ -e "$_sm_statedir" ]; then
     "$_sm_rm" -rf "$_sm_statedir"
 else
     sm_log "no plugin state directory at $_sm_statedir; nothing to remove"
+fi
+
+_sm_trustdir=$(sm_trust_dir)
+if [ -e "$_sm_trustdir" ] || [ -L "$_sm_trustdir" ]; then
+    sm_log "removing coordinator key directory $_sm_trustdir"
+    "$_sm_rm" -rf "$_sm_trustdir"
+else
+    sm_log "no coordinator key directory at $_sm_trustdir; nothing to remove"
 fi
 
 _sm_stagedir=$(sm_scaffold_stage_root)
