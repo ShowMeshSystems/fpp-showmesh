@@ -388,8 +388,7 @@ sm_ensure_scaffold_stage_dir() {
 # Ensures sm_trust_dir() exists, mode 0755, owned root:root, and never
 # chowns it to fpp:fpp or touches what is inside it. Same symlink-refusing
 # walk as sm_ensure_scaffold_stage_dir, and the same ownership reassertion on
-# every call. SM_TRUST_OWNER exists only so this repository's tests can chown
-# without a distinct root; production code never sets it.
+# every call. The owner is fixed: no environment variable can change it.
 sm_ensure_trust_dir() {
     local _sm_dir _sm_chmod _sm_chown
     _sm_dir=$(sm_trust_dir)
@@ -399,13 +398,13 @@ sm_ensure_trust_dir() {
     sm_refuse_symlink "$_sm_dir" || return 1
     sm_mkdir_p_refuse_symlinks "$_sm_dir" || return 1
     sm_refuse_symlink "$_sm_dir" || return 1
-    "$_sm_chown" -h "${SM_TRUST_OWNER:-root:root}" "$_sm_dir" || {
-        sm_log_err "could not set ownership of trust directory $_sm_dir to ${SM_TRUST_OWNER:-root:root}"
+    "$_sm_chown" -h root:root "$_sm_dir" || {
+        sm_log_err "could not set ownership of coordinator key directory $_sm_dir to root:root"
         return 1
     }
     sm_refuse_symlink "$_sm_dir" || return 1
     "$_sm_chmod" 0755 "$_sm_dir" || {
-        sm_log_err "could not set permissions on trust directory $_sm_dir"
+        sm_log_err "could not set permissions on coordinator key directory $_sm_dir"
         return 1
     }
     sm_verify_mode "$_sm_dir" 755

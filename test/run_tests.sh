@@ -1901,8 +1901,8 @@ fi
 echo "== coordinator key directory =="
 
 # The plugin trusts a key only from a root-owned directory, so this one is
-# never chowned to fpp:fpp and nothing ever recurses into it. SM_TRUST_OWNER
-# is the test-only override, the same pattern as SM_SCAFFOLD_STAGE_OWNER.
+# never chowned to fpp:fpp and nothing ever recurses into it. Its owner is
+# fixed in the script; chown is shadowed here only to log what it is asked.
 _sm_trust_default=$(sm_trust_dir)
 assert_eq "the coordinator key directory is the documented /etc path" "/etc/showmesh-fpp-plugin-trust" "$_sm_trust_default"
 case "$_sm_trust_default" in
@@ -1995,6 +1995,12 @@ sm_ensure_config_scaffold >/dev/null 2>&1
 status=$?
 assert_success "sm_ensure_config_scaffold succeeds with all three directories redirected" "$status"
 assert_eq "sm_ensure_config_scaffold creates the coordinator key directory at mode 0755" "755" "$(sm_current_mode "$_sm_trust_scaffold/trust")"
+assert_eq "every chown of the coordinator key directory in the full scaffold run is exactly -h root:root" "-h root:root $_sm_trust_scaffold/trust" "$(grep -F "$_sm_trust_scaffold/trust" "$_sm_trust_chown_log" | sort -u)"
+if grep -F "$_sm_trust_scaffold/trust" "$_sm_trust_chown_log" | grep -E -e '(^| )-[A-Za-z]*R' -e 'fpp:' >/dev/null 2>&1; then
+    fail "the full scaffold run never chowns the coordinator key directory recursively or to fpp" "$(grep -F "$_sm_trust_scaffold/trust" "$_sm_trust_chown_log")"
+else
+    pass "the full scaffold run never chowns the coordinator key directory recursively or to fpp"
+fi
 
 # The real uninstall script, against a copy whose three fixed paths point into the tmp tree.
 _sm_trust_unin="$_sm_trust_test_dir/uninstall-copy"
@@ -2004,6 +2010,17 @@ sed -e "s#\"/etc/showmesh-fpp-plugin-trust\"#\"$_sm_trust_unin/trust\"#" \
     -e "s#\"/etc/showmesh-fpp-plugin\"#\"$_sm_trust_unin/cred\"#" \
     -e "s#\"/home/fpp/media/plugindata/fpp-showmesh\"#\"$_sm_trust_unin/state\"#" \
     "$_sm_repo_dir/scripts/lib/common.sh" > "$_sm_trust_unin/scripts/lib/common.sh"
+# The rewritten copy must resolve all three paths into the tmp tree, or the rm -rf below would hit real ones.
+_sm_trust_resolved=$(sh -c '. "$1"; printf "%s\n%s\n%s\n" "$(sm_credential_dir)" "$(sm_trust_dir)" "$(sm_state_dir)"' _ "$_sm_trust_unin/scripts/lib/common.sh")
+assert_eq "the rewritten uninstall copy points every directory into the tmp tree" "$_sm_trust_unin/cred
+$_sm_trust_unin/trust
+$_sm_trust_unin/state" "$_sm_trust_resolved"
+if [ "$_sm_trust_resolved" != "$_sm_trust_unin/cred
+$_sm_trust_unin/trust
+$_sm_trust_unin/state" ]; then
+    echo "refusing to run the uninstall copy against real paths" >&2
+    exit 1
+fi
 mkdir -p "$_sm_trust_unin/trust" "$_sm_trust_unin/cred" "$_sm_trust_unin/state"
 printf 'stored-key\n' > "$_sm_trust_unin/trust/coordinator-fallback-public-key"
 out=$(SM_SCAFFOLD_STAGE_ROOT="$_sm_trust_unin/stage" sh "$_sm_trust_unin/scripts/fpp_uninstall.sh" 2>&1)
