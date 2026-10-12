@@ -285,10 +285,10 @@ rm -f "$_sm_fixture_dir/pairing-status.json" "$_sm_fixture_dir/pairing-code"
 
 # ---------------------------------------------------------------------------
 # Integration: the page is a fragment for FPP's own plugin.php to wrap, and
-# it carries the excluded-channels field.
+# it carries the two channel-list fields.
 # ---------------------------------------------------------------------------
 
-_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . "" '1-512, 1025-512"><script>alert(3)</script>' 2>&1)
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . "" '1-512, 1025-512"><script>alert(3)</script>' '1-48, 97-48"><script>alert(4)</script>' 2>&1)
 for _sm_wrapper in '<!DOCTYPE' '<html' '<head' '<body' 'bodyWrapper' '<title' '</html>'; do
     assert_not_contains "the page emits no $_sm_wrapper of its own" "$_sm_render_out" "$_sm_wrapper"
 done
@@ -299,10 +299,20 @@ assert_not_contains "the stored setting never reaches the page as raw markup" "$
 assert_contains "one line gives the form to type" "$_sm_render_out" "<p>List each as start-count, for example 1-512, 1025-512.</p>"
 assert_contains "a read-only line shows what the plugin holds now" "$_sm_render_out" '<th>Channels left alone now</th><td id="smReadoutExcluded">unknown</td>'
 assert_contains "the field saves through the plugin's own route" "$_sm_render_out" '"/api/plugin-apis/showmesh/brightness/excluded-ranges"'
+assert_contains "the apply-list field is labelled in plain words" "$_sm_render_out" '<label for="smApplyRanges">Channels the ceiling changes</label>'
+assert_contains "the apply-list field shows the stored setting, escaped" "$_sm_render_out" 'value="1-48, 97-48&quot;&gt;&lt;script&gt;alert(4)&lt;/script&gt;"'
+assert_not_contains "the stored apply list never reaches the page as raw markup" "$_sm_render_out" "<script>alert(4)</script>"
+assert_contains "its helper line gives the form and what empty means" "$_sm_render_out" "<p>List each as start-count, for example 1-512, 1025-512. Leave empty for FPP's output channels.</p>"
+assert_contains "a read-only line shows the apply list the plugin holds now" "$_sm_render_out" '<th>Channels the ceiling changes now</th><td id="smReadoutApplied">unknown</td>'
+assert_contains "the apply-list field saves through the plugin's own route" "$_sm_render_out" '"/api/plugin-apis/showmesh/brightness/channel-ranges"'
+assert_contains "the apply-list field has its own Save button outside any form" "$_sm_render_out" '<button type="button" id="smApplySave">Save</button>'
+assert_contains "a missing plugin route tells the operator to update the plugin" "$_sm_render_out" "Update the plugin."
+assert_contains "a save answer without a list is ignored" "$_sm_render_out" "Array.isArray(data[list.key])"
 assert_not_contains "nothing reloads the page when no pairing is waiting" "$_sm_render_out" "window.location.reload"
 
 _sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
 assert_contains "with no FPP settings in scope the field is empty" "$_sm_render_out" '<input type="text" id="smExcludeRanges" size="40" value="">'
+assert_contains "with no FPP settings in scope the apply-list field is empty" "$_sm_render_out" '<input type="text" id="smApplyRanges" size="40" value="">'
 
 # ---------------------------------------------------------------------------
 # Integration: redirect-after-post outcome banners, from the query flags a
