@@ -54,6 +54,7 @@ $smPairRequestFailed = isset($_GET['smPairError']);
 $smPostAction = sm_post_action_target($requestUri);
 $smAutoRefreshPairing = $smPairingState === 'waiting' || ($smPairRequested && $smPairingState === 'idle');
 $smExcludeRanges = sm_setting_text(isset($settings) ? $settings : null, 'ShowMeshExcludeChannelRanges');
+$smApplyRanges = sm_setting_text(isset($settings) ? $settings : null, 'ShowMeshChannelRanges');
 ?>
 <table>
 <tr><th>Plugin version</th><td><?php echo $smVersion !== null ? sm_h($smVersion) : 'unknown'; ?></td></tr>
@@ -161,8 +162,17 @@ if ($smBrightness['status'] === 'ok'):
 <tr><th>Transition gain</th><td id="smReadoutTransitionGain">unknown</td></tr>
 <tr><th>Effective output</th><td id="smReadoutEffectiveOutput">unknown</td></tr>
 <tr><th>Fade</th><td id="smReadoutFade">unknown</td></tr>
+<tr><th>Channels the ceiling changes now</th><td id="smReadoutApplied">unknown</td></tr>
 <tr><th>Channels left alone now</th><td id="smReadoutExcluded">unknown</td></tr>
 </table>
+
+<p>
+<label for="smApplyRanges">Channels the ceiling changes</label>
+<input type="text" id="smApplyRanges" size="40" value="<?php echo sm_h($smApplyRanges); ?>">
+<button type="button" id="smApplySave">Save</button>
+</p>
+<p>List each as start-count, for example 1-512, 1025-512. Leave empty for FPP's output channels.</p>
+<p id="smApplyMessage"></p>
 
 <p>
 <label for="smExcludeRanges">Channels the ceiling never changes</label>
@@ -203,11 +213,29 @@ if ($smBrightness['status'] === 'ok'):
         transitionGain: document.getElementById("smReadoutTransitionGain"),
         effectiveOutput: document.getElementById("smReadoutEffectiveOutput"),
         fade: document.getElementById("smReadoutFade"),
+        applied: document.getElementById("smReadoutApplied"),
         excluded: document.getElementById("smReadoutExcluded")
     };
-    var excludeField = document.getElementById("smExcludeRanges");
-    var excludeSave = document.getElementById("smExcludeSave");
-    var excludeMessage = document.getElementById("smExcludeMessage");
+    var excludeList = {
+        key: "excludedRanges",
+        route: "/api/plugin-apis/showmesh/brightness/excluded-ranges",
+        field: document.getElementById("smExcludeRanges"),
+        save: document.getElementById("smExcludeSave"),
+        message: document.getElementById("smExcludeMessage"),
+        readout: readout.excluded,
+        savedEmpty: "Saved. The ceiling now applies to every channel.",
+        saved: "Saved. The ceiling now leaves these channels alone."
+    };
+    var applyList = {
+        key: "channelRanges",
+        route: "/api/plugin-apis/showmesh/brightness/channel-ranges",
+        field: document.getElementById("smApplyRanges"),
+        save: document.getElementById("smApplySave"),
+        message: document.getElementById("smApplyMessage"),
+        readout: readout.applied,
+        savedEmpty: "Saved. The ceiling now changes FPP's output channels.",
+        saved: "Saved. The ceiling now changes only these channels."
+    };
     var fallbackUrl = window.location.pathname + window.location.search +
         (window.location.search ? "&" : "?") + "smAjax=brightness&nopage=1";
     var debounceTimer = null;
@@ -224,6 +252,7 @@ if ($smBrightness['status'] === 'ok'):
         readout.transitionGain.textContent = percent(data.transitionGain);
         readout.effectiveOutput.textContent = percent(data.effectiveOutput);
         readout.fade.textContent = data.fadeActive === true ? "in progress" : (data.fadeActive === false ? "none" : "unknown");
+        readout.applied.textContent = rangesText(data.channelRanges);
         readout.excluded.textContent = rangesText(data.excludedRanges);
     }
 
@@ -257,23 +286,25 @@ if ($smBrightness['status'] === 'ok'):
     /* Saved through the plugin's own route, not FPP's setting save: FPP
      * hands fppd a changed setting cut off at its first comma, so only the
      * first range would apply until a restart. The route stores the setting. */
-    function saveExcluded() {
-        var ranges = parseRanges(excludeField.value);
+    function saveRanges(list) {
+        var ranges = parseRanges(list.field.value);
         if (ranges === null) {
-            excludeMessage.textContent = "That list is not start-count pairs. Example: 1-512, 1025-512";
+            list.message.textContent = "That list is not start-count pairs. Example: 1-512, 1025-512";
             return;
         }
-        fetch("/api/plugin-apis/showmesh/brightness/excluded-ranges", {
+        var body = {};
+        body[list.key] = ranges;
+        fetch(list.route, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ excludedRanges: ranges })
+            body: JSON.stringify(body)
         }).then(function (response) {
             if (response.status === 400) {
-                excludeMessage.textContent = "Not saved: ranges overlap or run past the last channel. Fix the list.";
+                list.message.textContent = "Not saved: ranges overlap or run past the last channel. Fix the list.";
                 return null;
             }
             if (response.status === 404) {
-                excludeMessage.textContent = "Not saved: this ShowMesh plugin cannot save this list yet. Update the plugin.";
+                list.message.textContent = "Not saved: this ShowMesh plugin cannot save this list yet. Update the plugin.";
                 return null;
             }
             if (!response.ok) {
@@ -281,15 +312,13 @@ if ($smBrightness['status'] === 'ok'):
             }
             return response.json();
         }).then(function (data) {
-            if (!data || !Array.isArray(data.excludedRanges)) {
+            if (!data || !Array.isArray(data[list.key])) {
                 return;
             }
-            readout.excluded.textContent = rangesText(data.excludedRanges);
-            excludeMessage.textContent = data.excludedRanges.length === 0
-                ? "Saved. The ceiling now applies to every channel."
-                : "Saved. The ceiling now leaves these channels alone.";
+            list.readout.textContent = rangesText(data[list.key]);
+            list.message.textContent = ranges.length === 0 ? list.savedEmpty : list.saved;
         }).catch(function () {
-            excludeMessage.textContent = "Not saved: the ShowMesh plugin did not answer. Restart FPP and retry.";
+            list.message.textContent = "Not saved: the ShowMesh plugin did not answer. Restart FPP and retry.";
         });
     }
 
@@ -323,9 +352,11 @@ if ($smBrightness['status'] === 'ok'):
         });
     }
 
-    if (excludeSave) {
-        excludeSave.addEventListener("click", saveExcluded);
-    }
+    [applyList, excludeList].forEach(function (list) {
+        if (list.save) {
+            list.save.addEventListener("click", function () { saveRanges(list); });
+        }
+    });
 
     pollReadout();
     setInterval(pollReadout, 3000);
