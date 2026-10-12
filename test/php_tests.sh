@@ -252,7 +252,8 @@ _sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_di
 assert_contains "rendered page shows waiting with the pairing code" "$_sm_render_out" "ABCD-1234"
 assert_contains "rendered page shows the code's expiry time" "$_sm_render_out" "Expires at"
 assert_contains "the pairing code is styled to read across a room" "$_sm_render_out" "font-size:3em;font-family:monospace"
-assert_contains "waiting auto-refreshes the page" "$_sm_render_out" '<meta http-equiv="refresh" content="3">'
+assert_contains "waiting reloads the page after 3 seconds" "$_sm_render_out" 'setTimeout(function () { window.location.reload(); }, 3000);'
+assert_not_contains "the reload is not a meta tag, which only works in a head" "$_sm_render_out" 'http-equiv="refresh"'
 assert_contains "the auto-refresh state says so in one sentence" "$_sm_render_out" "refreshes itself every 3 seconds"
 rm -f "$_sm_fixture_dir/pairing-code"
 
@@ -280,6 +281,27 @@ assert_contains "the failed state's lastError renders in escaped form" "$_sm_ren
 rm -f "$_sm_fixture_dir/pairing-status.json" "$_sm_fixture_dir/pairing-code"
 
 # ---------------------------------------------------------------------------
+# Integration: the page is a fragment for FPP's own plugin.php to wrap, and
+# it carries the excluded-channels field.
+# ---------------------------------------------------------------------------
+
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . "" '1-512, 1025-512"><script>alert(3)</script>' 2>&1)
+for _sm_wrapper in '<!DOCTYPE' '<html' '<head' '<body' 'bodyWrapper' '<title' '</html>'; do
+    assert_not_contains "the page emits no $_sm_wrapper of its own" "$_sm_render_out" "$_sm_wrapper"
+done
+assert_contains "the page still renders its sections" "$_sm_render_out" "<h2>Brightness ceiling</h2>"
+assert_contains "the excluded-channels field is labelled in plain words" "$_sm_render_out" '<label for="smExcludeRanges">Channels the ceiling never changes</label>'
+assert_contains "the field shows the stored setting, escaped" "$_sm_render_out" 'value="1-512, 1025-512&quot;&gt;&lt;script&gt;alert(3)&lt;/script&gt;"'
+assert_not_contains "the stored setting never reaches the page as raw markup" "$_sm_render_out" "<script>alert(3)</script>"
+assert_contains "one line gives the form to type" "$_sm_render_out" "<p>List each as start-count, for example 1-512, 1025-512.</p>"
+assert_contains "a read-only line shows what the plugin holds now" "$_sm_render_out" '<th>Channels left alone now</th><td id="smReadoutExcluded">unknown</td>'
+assert_contains "the field saves through the plugin's own route" "$_sm_render_out" '"/api/plugin-apis/showmesh/brightness/excluded-ranges"'
+assert_not_contains "nothing reloads the page when no pairing is waiting" "$_sm_render_out" "window.location.reload"
+
+_sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_dir")" . 2>&1)
+assert_contains "with no FPP settings in scope the field is empty" "$_sm_render_out" '<input type="text" id="smExcludeRanges" size="40" value="">'
+
+# ---------------------------------------------------------------------------
 # Integration: redirect-after-post outcome banners, from the query flags a
 # real redirect would carry.
 # ---------------------------------------------------------------------------
@@ -301,7 +323,7 @@ assert_contains "a failed pairing-request write shows a plain-sentence banner" "
 
 rm -f "$_sm_fixture_dir/pairing-request"
 _sm_post_out=$(sm_php test/php/render_post_fixture.php "$(basename "$_sm_fixture_dir")" . "/plugin.php?plugin=fpp-showmesh" "smAction=pair" 2>&1)
-assert_not_contains "a POST that writes pairing-request never renders the HTML page" "$_sm_post_out" "<!DOCTYPE"
+assert_not_contains "a POST that writes pairing-request never renders the HTML page" "$_sm_post_out" "Brightness ceiling"
 if [ -f "$_sm_fixture_dir/pairing-request" ]; then
     pass "the POST still performed the write itself"
 else

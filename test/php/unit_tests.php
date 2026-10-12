@@ -260,6 +260,13 @@ t_assert("brightness readout computes effectiveOutput as ceiling * gain / 100", 
 $readout = sm_brightness_readout(array('lastAppliedCeiling' => 'not a number', 'lastAppliedGain' => 50));
 t_assert("effectiveOutput is null when the ceiling is not numeric, never a guessed value", $readout['effectiveOutput'] === null, var_export($readout, true));
 
+/* --- one FPP setting as text --- */
+
+t_assert("a setting FPP supplied is returned trimmed", sm_setting_text(array('ShowMeshExcludeChannelRanges' => " 1-512, 1025-512 \n"), 'ShowMeshExcludeChannelRanges') === '1-512, 1025-512', '');
+t_assert("an unset setting reads as empty text", sm_setting_text(array('other' => 'x'), 'ShowMeshExcludeChannelRanges') === '', '');
+t_assert("no settings array at all reads as empty text", sm_setting_text(null, 'ShowMeshExcludeChannelRanges') === '', '');
+t_assert("a setting that is not text reads as empty text", sm_setting_text(array('ShowMeshExcludeChannelRanges' => array('1-512')), 'ShowMeshExcludeChannelRanges') === '', '');
+
 /* --- redirect-after-post target: drops old flags, keeps the rest --- */
 
 $target = sm_post_redirect_target('/plugin.php?plugin=fpp-showmesh&page=plugin.php', 'smPaired', '1');
