@@ -24,7 +24,9 @@
     "packages": [
       "make",
       "g++",
-      "libcurl4-openssl-dev"
+      "libcurl4-openssl-dev",
+      "libjsoncpp-dev",
+      "libssl-dev"
     ]
   }
 }
