@@ -4,7 +4,8 @@
  * the page body (headers_list() reports nothing under the CLI SAPI, so
  * this checks the observable stand-in: no HTML reaches the client).
  * $argv[1] = state dir, $argv[2] = repo root, $argv[3] = request URI,
- * $argv[4] = POST body as a query string (e.g. "smAction=pair"). */
+ * $argv[4] = POST body as a query string (e.g. "smAction=pair").
+ * $argv[5] = "wrapped" to send markup first, as FPP's page wrapper does. */
 
 define('SM_SHOWMESH_STATE_DIR', $argv[1]);
 define('SM_SHOWMESH_PLUGIN_DIR', $argv[2]);
@@ -13,6 +14,11 @@ define('SM_SHOWMESH_NOW_MILLIS', 2000000000000);
 $_SERVER['REQUEST_METHOD'] = 'POST';
 $_SERVER['REQUEST_URI'] = $argv[3];
 parse_str($argv[4], $_POST);
+
+if (isset($argv[5]) && $argv[5] === 'wrapped') {
+    echo "<html><body>\n";
+    flush();
+}
 
 chdir($argv[2]);
 require $argv[2] . '/plugin.php';
