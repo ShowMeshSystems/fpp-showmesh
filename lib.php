@@ -277,6 +277,15 @@ function sm_post_redirect_target($requestUri, $flagKey, $flagValue) {
     return $path . '?' . http_build_query($query);
 }
 
+/* One FPP setting as trimmed text, from the $settings array FPP's own
+ * plugin.php has in scope; '' when FPP did not supply it or it is unset. */
+function sm_setting_text($settings, $name) {
+    if (!is_array($settings) || !isset($settings[$name]) || !is_scalar($settings[$name])) {
+        return '';
+    }
+    return trim((string) $settings[$name]);
+}
+
 /* Maps brightness-state's own fields to CONTRACT.md's plugin GET route
  * shape: transitionGain comes from lastAppliedGain, effectiveOutput is
  * computed from both when numeric, else null (never a fabricated zero). */
