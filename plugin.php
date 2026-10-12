@@ -208,7 +208,7 @@ if ($smBrightness['status'] === 'ok'):
     var excludeSave = document.getElementById("smExcludeSave");
     var excludeMessage = document.getElementById("smExcludeMessage");
     var fallbackUrl = window.location.pathname + window.location.search +
-        (window.location.search ? "&" : "?") + "smAjax=brightness";
+        (window.location.search ? "&" : "?") + "smAjax=brightness&nopage=1";
     var debounceTimer = null;
 
     function percent(value) {
@@ -271,12 +271,16 @@ if ($smBrightness['status'] === 'ok'):
                 excludeMessage.textContent = "Not saved: ranges overlap or run past the last channel. Fix the list.";
                 return null;
             }
+            if (response.status === 404) {
+                excludeMessage.textContent = "Not saved: this ShowMesh plugin cannot save this list yet. Update the plugin.";
+                return null;
+            }
             if (!response.ok) {
                 throw new Error("status " + response.status);
             }
             return response.json();
         }).then(function (data) {
-            if (!data) {
+            if (!data || !Array.isArray(data.excludedRanges)) {
                 return;
             }
             readout.excluded.textContent = rangesText(data.excludedRanges);
@@ -325,7 +329,27 @@ if ($smBrightness['status'] === 'ok'):
     pollReadout();
     setInterval(pollReadout, 3000);
 <?php if ($smAutoRefreshPairing): ?>
-    setTimeout(function () { window.location.reload(); }, 3000);
+    function operatorIsEditing() {
+        var active = document.activeElement;
+        if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+            return true;
+        }
+        var fields = document.querySelectorAll("input, textarea");
+        for (var i = 0; i < fields.length; i++) {
+            if (fields[i].value !== fields[i].defaultValue) {
+                return true;
+            }
+        }
+        return false;
+    }
+    function reloadWhenIdle() {
+        if (operatorIsEditing()) {
+            setTimeout(reloadWhenIdle, 3000);
+            return;
+        }
+        window.location.reload();
+    }
+    setTimeout(reloadWhenIdle, 3000);
 <?php endif; ?>
 })();
 </script>

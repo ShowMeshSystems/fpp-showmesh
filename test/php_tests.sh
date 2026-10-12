@@ -252,7 +252,10 @@ _sm_render_out=$(sm_php test/php/render_fixture.php "$(basename "$_sm_fixture_di
 assert_contains "rendered page shows waiting with the pairing code" "$_sm_render_out" "ABCD-1234"
 assert_contains "rendered page shows the code's expiry time" "$_sm_render_out" "Expires at"
 assert_contains "the pairing code is styled to read across a room" "$_sm_render_out" "font-size:3em;font-family:monospace"
-assert_contains "waiting reloads the page after 3 seconds" "$_sm_render_out" 'setTimeout(function () { window.location.reload(); }, 3000);'
+assert_contains "waiting reloads the page after 3 seconds" "$_sm_render_out" 'setTimeout(reloadWhenIdle, 3000);'
+assert_contains "waiting does not reload while the operator is typing" "$_sm_render_out" 'if (operatorIsEditing()) {'
+assert_contains "the brightness fallback asks FPP for the bare page" "$_sm_render_out" 'smAjax=brightness&nopage=1'
+assert_contains "an older plugin without the route gets the update advice" "$_sm_render_out" 'Update the plugin.'
 assert_not_contains "the reload is not a meta tag, which only works in a head" "$_sm_render_out" 'http-equiv="refresh"'
 assert_contains "the auto-refresh state says so in one sentence" "$_sm_render_out" "refreshes itself every 3 seconds"
 rm -f "$_sm_fixture_dir/pairing-code"
