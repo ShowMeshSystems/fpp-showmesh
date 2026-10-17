@@ -1,13 +1,13 @@
 {
-  "note": "Real digests for version 0.3.0, built from the plugin repository's main branch at commit 693155cbd1e4 (make release-with-prebuilt-fpp10 VERSION=0.3.0). This version adds the channel ranges the brightness ceiling leaves alone and writes both channel-range lists through the plugin's own routes, because FPP cuts a plugin setting off at its first comma when saved through its own forms. Those exact artifacts are published as the v0.3.0 pre-release on ShowMeshSystems/showmesh-fpp-plugin, the default artifact host. Regenerate this file from the manifest whenever a new release is cut; there is no tooling that does it automatically. The three native-prebuilt-fpp10 objects were built once each against FPP 10.0 on an Apple Silicon Mac under Docker Desktop; no second host has rebuilt and compared them.",
-  "version": "0.3.0",
+  "note": "Real digests for version 0.4.0, built from the plugin repository's main branch at commit ecc630c744f1 (make release-with-prebuilt-fpp10 VERSION=0.4.0). This version sends the brightness state to other FPP hosts over FPP's MultiSync network send, playing or idle, and reports the ceiling target, fade end and last deliberate change time, which ShowMesh Core uses to keep one brightness ceiling on every FPP. Those exact artifacts are published as the v0.4.0 pre-release on ShowMeshSystems/showmesh-fpp-plugin, the default artifact host. Regenerate this file from the manifest whenever a new release is cut; there is no tooling that does it automatically. The three native-prebuilt-fpp10 objects were built once each against FPP 10.0 on an Apple Silicon Mac under Docker Desktop; no second host has rebuilt and compared them.",
+  "version": "0.4.0",
   "artifacts": [
-    { "filename": "showmesh-fpp-plugin_0.3.0_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "499a22084423cf7b755518719f7a453c2b1090793a80d6811f07e96da331350a" },
-    { "filename": "showmesh-fpp-plugin_0.3.0_linux_arm64.tar.gz", "kind": "go-helper", "architecture": "arm64", "sha256": "90e10560841fc59a57d0f82315aeb87fd59731c251e0e6718f485fa11d051bb5" },
-    { "filename": "showmesh-fpp-plugin_0.3.0_linux_armv7.tar.gz", "kind": "go-helper", "architecture": "armv7", "sha256": "1451ba4fafbdaac29ea8cc6e78d1cd17725f343485a9a148a8e3e43cacd9fea3" },
-    { "filename": "showmesh-fpp-plugin-native_0.3.0.tar.gz", "kind": "native-source", "architecture": "any", "sha256": "7faa0f4a55f33f3b6a1859a49236f68d3fdb1bcb236a6fb7c7dc9f25032022a1" },
-    { "filename": "libshowmesh-fpp10-amd64.so", "kind": "native-prebuilt-fpp10", "architecture": "amd64", "sha256": "2313e2d6a621b2a065c0bdb7dd259f700a6d5dac319e77b82449e2a8ec78e862" },
-    { "filename": "libshowmesh-fpp10-arm64.so", "kind": "native-prebuilt-fpp10", "architecture": "arm64", "sha256": "7cdfc72e5bacec76f314af765503aaf951d1ab7b90290cae44116ae2d9560162" },
-    { "filename": "libshowmesh-fpp10-armv7.so", "kind": "native-prebuilt-fpp10", "architecture": "armv7", "sha256": "1a5c1592a33487b5e7d928cb68c52182148e6ba9cd314d032cbca60336dbc7fe" }
+    { "filename": "showmesh-fpp-plugin_0.4.0_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "718c4168c35ec58eb611021a870e76ff1373beea71e1380d614139554e325e06" },
+    { "filename": "showmesh-fpp-plugin_0.4.0_linux_arm64.tar.gz", "kind": "go-helper", "architecture": "arm64", "sha256": "9fcbb8c5414fa1a09e52cce39ec2254e7134f010e7235596265a717aedb5c7b8" },
+    { "filename": "showmesh-fpp-plugin_0.4.0_linux_armv7.tar.gz", "kind": "go-helper", "architecture": "armv7", "sha256": "5fd5adcd3c4e11ebd0eca33614e0b4102712a74280f81a89b856bdcff3d89b4e" },
+    { "filename": "showmesh-fpp-plugin-native_0.4.0.tar.gz", "kind": "native-source", "architecture": "any", "sha256": "944f9b82a0241522f0b0bcd986b27a907b585e02d15b4fe9e13fe26a3f15414d" },
+    { "filename": "libshowmesh-fpp10-amd64.so", "kind": "native-prebuilt-fpp10", "architecture": "amd64", "sha256": "9e9935ca3aa9485b814c20206319103a15d82fb75e08e7d020bcc3d9a66a400a" },
+    { "filename": "libshowmesh-fpp10-arm64.so", "kind": "native-prebuilt-fpp10", "architecture": "arm64", "sha256": "e70b1ca866ec3eac5f47f25fe1c9e7da24e6eadb67260515922aace89edaadda" },
+    { "filename": "libshowmesh-fpp10-armv7.so", "kind": "native-prebuilt-fpp10", "architecture": "armv7", "sha256": "6135425b339ddfdbc003eff1c7928ff9851d160ccb3626a063428b47205b4f8a" }
   ]
 }
