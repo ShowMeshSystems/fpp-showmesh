@@ -157,6 +157,7 @@ if ($smBrightness['status'] === 'ok'):
 <input type="range" id="smCeiling" min="0" max="100" step="1"
     value="<?php echo is_numeric($lastApplied) ? (int) $lastApplied : 0; ?>">
 </p>
+<p>ShowMesh copies this ceiling to every FPP it knows about. While ShowMesh is unreachable, a change here reaches only this FPP and, on a player, its MultiSync remotes.</p>
 <table>
 <tr><th>Ceiling</th><td id="smReadoutCeiling">unknown</td></tr>
 <tr><th>Transition gain</th><td id="smReadoutTransitionGain">unknown</td></tr>
