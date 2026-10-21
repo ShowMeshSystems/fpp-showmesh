@@ -69,6 +69,22 @@
     "displayName": "ShowMesh: Power Down Presentation",
     "displayHint": "Ends the night and removes presentation power, where ShowMesh controls that power.",
     "script": "power-down-presentation.sh",
+    "args": [
+      {
+        "name": "force",
+        "description": "Force",
+        "help": "Powers down without waiting for the show to finish or for FPP to confirm it stopped. Safety rules still apply.",
+        "type": "bool",
+        "optional": true,
+        "default": false
+      }
+    ]
+  },
+  {
+    "name": "ShowMeshEndSession",
+    "displayName": "ShowMesh: End Session",
+    "displayHint": "Ends the night session now without fading or powering down, so the next Prepare Site can start. Use it as a late backup.",
+    "script": "end-session.sh",
     "args": []
   }
 ]
