@@ -2753,6 +2753,7 @@ else
         commands/request-final-show.sh \
         commands/fade-out-night.sh \
         commands/power-down-presentation.sh \
+        commands/end-session.sh \
         test/run_tests.sh
     do
         _sm_recorded_mode=$(cd "$_sm_repo_dir" && "$_sm_git" ls-files -s -- "$_sm_entrypoint" 2>/dev/null | awk '{print $1}')
@@ -2989,7 +2990,7 @@ cp -R "$_sm_repo_dir/commands" "$_sm_night_plugin/commands"
 cp -R "$_sm_repo_dir/scripts/lib" "$_sm_night_plugin/scripts/lib"
 printf '#!/bin/sh\necho "$*"\n' > "$_sm_night_plugin/showmesh-fpp-plugin"
 chmod 0755 "$_sm_night_plugin/showmesh-fpp-plugin"
-for _sm_night_cmd in prepare-site run-readiness start-preshow start-night request-final-show fade-out-night power-down-presentation; do
+for _sm_night_cmd in prepare-site run-readiness start-preshow start-night request-final-show fade-out-night power-down-presentation end-session; do
     _sm_night_out=$(env -i MEDIADIR=/home/fpp/media FPPDIR=/opt/fpp SCRIPTDIR="$_sm_night_plugin/commands" \
         /bin/sh "$_sm_night_plugin/commands/$_sm_night_cmd.sh" 2>&1)
     assert_eq "$_sm_night_cmd.sh sends $_sm_night_cmd to the binary" \
@@ -3012,6 +3013,20 @@ for _sm_stop_case in "absent|" "false|false" "empty|''" "true|true"; do
     _sm_stop_want="night --config-dir /home/fpp/media/plugindata/fpp-showmesh prepare-site"
     [ "$_sm_stop_name" = true ] && _sm_stop_want="$_sm_stop_want --stop-playlists"
     assert_eq "prepare-site.sh with Stop playlists $_sm_stop_name" "$_sm_stop_want" "$_sm_stop_out"
+done
+
+# power-down-presentation's optional Force argument reaches the binary as --force only when it is true.
+for _sm_force_case in absent false true; do
+    if [ "$_sm_force_case" = absent ]; then
+        _sm_force_out=$(env -i MEDIADIR=/home/fpp/media FPPDIR=/opt/fpp SCRIPTDIR="$_sm_night_plugin/commands" \
+            /bin/sh "$_sm_night_plugin/commands/power-down-presentation.sh" 2>&1)
+    else
+        _sm_force_out=$(env -i MEDIADIR=/home/fpp/media FPPDIR=/opt/fpp SCRIPTDIR="$_sm_night_plugin/commands" \
+            /bin/sh "$_sm_night_plugin/commands/power-down-presentation.sh" "$_sm_force_case" 2>&1)
+    fi
+    _sm_force_want="night --config-dir /home/fpp/media/plugindata/fpp-showmesh power-down-presentation"
+    [ "$_sm_force_case" = true ] && _sm_force_want="$_sm_force_want --force"
+    assert_eq "power-down-presentation.sh with Force $_sm_force_case" "$_sm_force_want" "$_sm_force_out"
 done
 
 # The shipped description declares the argument, optional and off by default.
