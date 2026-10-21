@@ -49,7 +49,7 @@ _sm_plugin_dir=$(cd "$_sm_script_dir/.." && pwd)
 
 _sm_macro_id="${1:-}"
 if [ -z "$_sm_macro_id" ]; then
-    sm_log_err "no macro id given; the ShowMesh: Run Macro command requires one"
+    sm_log_err "No macro chosen. Pick a macro in the ShowMesh: Run Macro command."
     exit 1
 fi
 

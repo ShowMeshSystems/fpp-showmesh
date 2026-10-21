@@ -2745,6 +2745,7 @@ else
         scripts/fpp_uninstall.sh \
         scripts/preStart.sh \
         commands/run-macro.sh \
+        commands/run-action.sh \
         commands/night-command.sh \
         commands/prepare-site.sh \
         commands/run-readiness.sh \
