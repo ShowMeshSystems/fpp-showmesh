@@ -21,5 +21,8 @@ if [ ! -x "$_sm_binary" ]; then
     exit 1
 fi
 
-# The "--" keeps an id that starts with a hyphen from being read as a flag.
-exec "$_sm_binary" action --config-dir "$(sm_state_dir)" -- "$_sm_action_id"
+# FPP waits for this script on the thread that runs the playlist, and an action
+# can take minutes to resolve, so the binary runs in the background and records
+# its outcome in status.json. The "--" keeps a leading hyphen from reading as a flag.
+"$_sm_binary" action --config-dir "$(sm_state_dir)" -- "$_sm_action_id" </dev/null &
+exit 0
