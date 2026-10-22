@@ -2745,6 +2745,7 @@ else
         scripts/fpp_uninstall.sh \
         scripts/preStart.sh \
         commands/run-macro.sh \
+        commands/run-action.sh \
         commands/night-command.sh \
         commands/prepare-site.sh \
         commands/run-readiness.sh \
@@ -3028,6 +3029,51 @@ for _sm_force_case in absent false true; do
     [ "$_sm_force_case" = true ] && _sm_force_want="$_sm_force_want --force"
     assert_eq "power-down-presentation.sh with Force $_sm_force_case" "$_sm_force_want" "$_sm_force_out"
 done
+
+# Run Macro and Run Action hand their id to the binary after "--", and refuse an empty one.
+_sm_target_out=$(env -i MEDIADIR=/home/fpp/media FPPDIR=/opt/fpp SCRIPTDIR="$_sm_night_plugin/commands" \
+    /bin/sh "$_sm_night_plugin/commands/run-macro.sh" macro-1 2>&1)
+assert_eq "run-macro.sh sends the macro id to the binary" \
+    "run --config-dir /home/fpp/media/plugindata/fpp-showmesh -- macro-1" "$_sm_target_out"
+_sm_target_out=$(env -i MEDIADIR=/home/fpp/media FPPDIR=/opt/fpp SCRIPTDIR="$_sm_night_plugin/commands" \
+    /bin/sh "$_sm_night_plugin/commands/run-action.sh" act-1 2>&1)
+assert_eq "run-action.sh sends the action id to the binary" \
+    "action --config-dir /home/fpp/media/plugindata/fpp-showmesh -- act-1" "$_sm_target_out"
+for _sm_target_script in run-macro run-action; do
+    if env -i MEDIADIR=/home/fpp/media FPPDIR=/opt/fpp SCRIPTDIR="$_sm_night_plugin/commands" \
+        /bin/sh "$_sm_night_plugin/commands/$_sm_target_script.sh" "" >"$_sm_tmp/target-empty.out" 2>&1; then
+        fail "$_sm_target_script.sh refuses an empty id" "it exited 0"
+    else
+        assert_contains "$_sm_target_script.sh refuses an empty id" "$(cat "$_sm_tmp/target-empty.out")" "chosen"
+    fi
+done
+
+# Run Action returns to FPP before the binary finishes, so a slow action never holds the playlist.
+_sm_slow_plugin="$_sm_tmp/slow-action-plugin"
+mkdir -p "$_sm_slow_plugin/scripts"
+cp -R "$_sm_repo_dir/commands" "$_sm_slow_plugin/commands"
+cp -R "$_sm_repo_dir/scripts/lib" "$_sm_slow_plugin/scripts/lib"
+printf '#!/bin/sh
+sleep 2
+echo "$*" > "%s"
+' "$_sm_tmp/slow-action.out" > "$_sm_slow_plugin/showmesh-fpp-plugin"
+chmod 0755 "$_sm_slow_plugin/showmesh-fpp-plugin"
+env -i MEDIADIR=/home/fpp/media FPPDIR=/opt/fpp SCRIPTDIR="$_sm_slow_plugin/commands" \
+    /bin/sh "$_sm_slow_plugin/commands/run-action.sh" act-1 >/dev/null 2>&1
+status=$?
+assert_success "run-action.sh exits 0 while the action is still running" "$status"
+if [ -e "$_sm_tmp/slow-action.out" ]; then
+    fail "run-action.sh returns before the binary finishes" "the binary had already finished"
+else
+    pass "run-action.sh returns before the binary finishes"
+fi
+_sm_slow_wait=0
+while [ ! -s "$_sm_tmp/slow-action.out" ] && [ "$_sm_slow_wait" -lt 10 ]; do
+    sleep 1
+    _sm_slow_wait=$((_sm_slow_wait + 1))
+done
+assert_eq "the backgrounded binary still receives the action id" \
+    "action --config-dir /home/fpp/media/plugindata/fpp-showmesh -- act-1" "$(cat "$_sm_tmp/slow-action.out" 2>/dev/null)"
 
 # The shipped description declares the argument, optional and off by default.
 if python3 -c '

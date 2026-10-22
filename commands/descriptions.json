@@ -7,9 +7,27 @@
     "args": [
       {
         "name": "macroId",
-        "description": "The id of the ShowMesh macro to run, as shown in the ShowMesh operator UI or CLI.",
+        "description": "Macro",
         "type": "string",
-        "optional": false
+        "optional": false,
+        "contentListUrl": "api/plugin-apis/showmesh/macros",
+        "allowBlanks": true
+      }
+    ]
+  },
+  {
+    "name": "ShowMeshRunAction",
+    "displayName": "ShowMesh: Run Action",
+    "displayHint": "Asks the ShowMesh coordinator to run one action and records the outcome locally.",
+    "script": "run-action.sh",
+    "args": [
+      {
+        "name": "actionId",
+        "description": "Action",
+        "type": "string",
+        "optional": false,
+        "contentListUrl": "api/plugin-apis/showmesh/actions",
+        "allowBlanks": true
       }
     ]
   },
