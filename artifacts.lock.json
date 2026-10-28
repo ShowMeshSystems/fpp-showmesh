@@ -1,13 +1,13 @@
 {
-  "note": "Real digests for version 0.5.0, built from the plugin repository's main branch at commit 0ea127ff2e8f (make release-with-prebuilt-fpp10 VERSION=0.5.0). This version adds the action subcommand, serves the macro and action lists to FPP's command editor, and lets FPP force a power down and end a night session. Those exact artifacts are published as the v0.5.0 pre-release on ShowMeshSystems/showmesh-fpp-plugin, the default artifact host. Regenerate this file from the manifest whenever a new release is cut; there is no tooling that does it automatically. The three native-prebuilt-fpp10 objects were built once each against FPP 10.0 on an Apple Silicon Mac under Docker Desktop; no second host has rebuilt and compared them.",
-  "version": "0.5.0",
+  "note": "Real digests for version 0.6.0, built from the plugin repository's main branch at commit daea58f7928d (make release-with-prebuilt-fpp10 VERSION=0.6.0). This version lets the transition gain fade on an exact start and end time, so ShowMesh can fade the lights out of resting exactly before every show. Those exact artifacts are published as the v0.6.0 pre-release on ShowMeshSystems/showmesh-fpp-plugin, the default artifact host. Regenerate this file from the manifest whenever a new release is cut; there is no tooling that does it automatically. The three native-prebuilt-fpp10 objects were built once each against FPP 10.0 on an Apple Silicon Mac under Docker Desktop; no second host has rebuilt and compared them.",
+  "version": "0.6.0",
   "artifacts": [
-    { "filename": "showmesh-fpp-plugin_0.5.0_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "8d3d4a2a4265b37ae9936778862dd52e705698cc3e3225fe2b26c6686dca300b" },
-    { "filename": "showmesh-fpp-plugin_0.5.0_linux_arm64.tar.gz", "kind": "go-helper", "architecture": "arm64", "sha256": "ff738b518ad8cb2658a003eef4849cd3503a37049e77622b60623106195b34b7" },
-    { "filename": "showmesh-fpp-plugin_0.5.0_linux_armv7.tar.gz", "kind": "go-helper", "architecture": "armv7", "sha256": "a439456c9075edac4f2b23b87c89e9033b28cf2e69d4728e11cd9b096d4506fd" },
-    { "filename": "showmesh-fpp-plugin-native_0.5.0.tar.gz", "kind": "native-source", "architecture": "any", "sha256": "0a6af502cdceb6ceb1faf7dde54619e8403a91f8b077bce1f52a452c7c5711c4" },
-    { "filename": "libshowmesh-fpp10-amd64.so", "kind": "native-prebuilt-fpp10", "architecture": "amd64", "sha256": "efa79ad5a2f79064001d84f5732135894b8aef594726d2a3d2e8316b12489b5a" },
-    { "filename": "libshowmesh-fpp10-arm64.so", "kind": "native-prebuilt-fpp10", "architecture": "arm64", "sha256": "419dca73f7cef02f5a8e2bfab5c8411cfe77f2cc6f83d0d9d8d6087eb83692c0" },
-    { "filename": "libshowmesh-fpp10-armv7.so", "kind": "native-prebuilt-fpp10", "architecture": "armv7", "sha256": "2a613ffaba1bd89ce9328a45c190d6fe70a1eed0e92fa0035f3498919832736c" }
+    { "filename": "showmesh-fpp-plugin_0.6.0_linux_amd64.tar.gz", "kind": "go-helper", "architecture": "amd64", "sha256": "fdd2f048dcfccc83b4d2986d9092f2cae8554b6280e5cf3386cc9cf5299e9b5b" },
+    { "filename": "showmesh-fpp-plugin_0.6.0_linux_arm64.tar.gz", "kind": "go-helper", "architecture": "arm64", "sha256": "be562e2076713400220ff9a942ffd54cf32ea1dc0f6306021ba82da0e6806d42" },
+    { "filename": "showmesh-fpp-plugin_0.6.0_linux_armv7.tar.gz", "kind": "go-helper", "architecture": "armv7", "sha256": "6d2c75b7801025f20b3ace902396fb602ce5769ff6f928b66569ff9db773125b" },
+    { "filename": "showmesh-fpp-plugin-native_0.6.0.tar.gz", "kind": "native-source", "architecture": "any", "sha256": "b2185c522df4984d0f6a612ff8b495cb034dec8ddd21f3f1b1056e4734a3f663" },
+    { "filename": "libshowmesh-fpp10-amd64.so", "kind": "native-prebuilt-fpp10", "architecture": "amd64", "sha256": "66d9f86d40e283f962ccf320b3ed3b6aa394889255cdcab0cb58da391d2b5243" },
+    { "filename": "libshowmesh-fpp10-arm64.so", "kind": "native-prebuilt-fpp10", "architecture": "arm64", "sha256": "b01e31e842cac036e43bc6e56d386c7025ef1d0f972be611917abbaa9a7a851d" },
+    { "filename": "libshowmesh-fpp10-armv7.so", "kind": "native-prebuilt-fpp10", "architecture": "armv7", "sha256": "370151faa34d1e5ffdd85bb4979637ed1679e8def97f80a9441305603fd8e6bf" }
   ]
 }
